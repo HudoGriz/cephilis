@@ -1,0 +1,18 @@
+# cephilis sections.yaml
+# Each entry is a directory tree to measure for size (via CephFS xattrs).
+workers: 16
+sections:
+  - name: Home Users
+    path: /home
+  - name: Data Folders
+    path: /home/Data
+  - name: Nanopore
+    path: /home/Data/Nanopore
+  - name: Diagnostika
+    path: /home/Data/Diagnostika
+  - name: WES
+    path: /home/Data/Diagnostika/WES/WES-NovaSeq
+  - name: WGS
+    path: /home/Data/Diagnostika/WGS/WGS-NovaSeq
+  - name: WTS
+    path: /home/Data/Diagnostika/WTS/WTS-NovaSeq

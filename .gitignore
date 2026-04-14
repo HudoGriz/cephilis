@@ -1,0 +1,22 @@
+# Build output
+bin/
+dist/
+
+# Go test cache and cover profiles
+*.test
+*.out
+cover.html
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.claude/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# GoReleaser
+.goreleaser_checksums

@@ -1,0 +1,35 @@
+[Unit]
+Description=Cephilis Ceph /home mount and space exporter for Prometheus
+Documentation=https://prometheus.io/docs/guides/node-exporter/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/cephilis/metrics.env
+Environment="CEPHILIS_BIN=/usr/local/bin/cephilis"
+Environment="CEPHILIS_ARGS=all --format prom"
+Environment="CEPHILIS_OUTPUT_DIR=/var/lib/node_exporter/textfile_collector"
+Environment="CEPHILIS_OUTPUT_FILE=cephilis.prom"
+ExecStart=/bin/sh -c '"${CEPHILIS_BIN}" ${CEPHILIS_ARGS} > "${CEPHILIS_OUTPUT_DIR}/${CEPHILIS_OUTPUT_FILE}.tmp" && mv "${CEPHILIS_OUTPUT_DIR}/${CEPHILIS_OUTPUT_FILE}.tmp" "${CEPHILIS_OUTPUT_DIR}/${CEPHILIS_OUTPUT_FILE}"'
+
+TimeoutStartSec=15
+TimeoutSec=15
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+LimitAS=256M
+LimitRSS=128M
+LimitNOFILE=1024
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cephilis-metrics
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/var/lib/node_exporter/textfile_collector
