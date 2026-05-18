@@ -1,0 +1,65 @@
+groups:
+  - name: cephilis-storage
+    rules:
+      - alert: CephilisHomeMountDown
+        expr: cephilis_mount_up{name="home",required="true"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Required /home mount is not mounted on {{ $labels.hostname }}"
+          description: "cephilis reports /home is not mounted on {{ $labels.hostname }}."
+
+      - alert: CephilisHomeMountUnresponsive
+        expr: cephilis_mount_responsive{name="home",required="true"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Required /home mount is unresponsive on {{ $labels.hostname }}"
+          description: "cephilis could not stat the /home probe within the timeout."
+
+      - alert: CephilisHomeFSTypeMismatch
+        expr: cephilis_mount_fstype_match{name="home",required="true",expected="ceph"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "/home is not the expected CephFS filesystem on {{ $labels.hostname }}"
+          description: "Expected filesystem type {{ $labels.expected }}, got {{ $labels.actual }}."
+
+      - alert: CephilisCapsExhausted
+        expr: cephilis_caps_available == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CephFS client cap pool exhausted"
+          description: "The local CephFS client reports zero available caps."
+
+      - alert: CephilisStaleCapsIncreasing
+        expr: increase(cephilis_kernel_events_total{event="caps_stale"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "New CephFS stale-cap kernel events"
+          description: "cephilis observed new caps stale messages in the kernel log."
+
+      - alert: CephilisCephHealthNotOK
+        expr: cephilis_ceph_health_ok == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ceph health is not HEALTH_OK"
+          description: "cephilis reports Ceph status {{ $labels.status }}."
+
+      - alert: CephilisCollectorFailed
+        expr: cephilis_collector_success == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cephilis collector {{ $labels.collector }} failed"
+          description: "A cephilis collector has failed for at least five minutes."

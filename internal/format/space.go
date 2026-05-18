@@ -246,7 +246,7 @@ func mountTable(m model.MountResult) string {
 		lat = fmt.Sprintf("%.1f ms", *m.LatencySeconds*1000)
 	}
 	status := "DEGRADED"
-	if m.Mounted && m.Responsive {
+	if m.Mounted && m.Responsive && m.FSTypeMatches {
 		status = "OK"
 	}
 	var b strings.Builder
@@ -255,6 +255,11 @@ func mountTable(m model.MountResult) string {
 	b.WriteString("- hostname: " + m.Hostname + "\n")
 	b.WriteString("- mount: " + m.MountPath + "\n")
 	b.WriteString(fmt.Sprintf("- mounted: %t\n", m.Mounted))
+	if m.ExpectedFSType != "" {
+		b.WriteString("- expected_fstype: " + m.ExpectedFSType + "\n")
+		b.WriteString("- actual_fstype: " + m.ActualFSType + "\n")
+		b.WriteString(fmt.Sprintf("- fstype_matches: %t\n", m.FSTypeMatches))
+	}
 	b.WriteString("- probe: " + m.ProbeFile + "\n")
 	b.WriteString(fmt.Sprintf("- responsive: %t\n", m.Responsive))
 	b.WriteString("- latency: " + lat + "\n")
@@ -277,6 +282,7 @@ func mountProm(m model.MountResult, compat bool) string {
 	mount := sanitizePromLabel(m.MountPath)
 	host := sanitizePromLabel(m.Hostname)
 	probe := sanitizePromLabel(m.ProbeFile)
+	name := sanitizePromLabel(m.Name)
 	lat := 0.0
 	if m.LatencySeconds != nil {
 		lat = *m.LatencySeconds
@@ -285,13 +291,17 @@ func mountProm(m model.MountResult, compat bool) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("# HELP %s_mount_up Mount point is currently mounted.\n", prefix))
 	b.WriteString(fmt.Sprintf("# TYPE %s_mount_up gauge\n", prefix))
-	b.WriteString(fmt.Sprintf("%s_mount_up{mount=\"%s\",hostname=\"%s\"} %d\n\n", prefix, mount, host, btoi(m.Mounted)))
+	b.WriteString(fmt.Sprintf("%s_mount_up{name=\"%s\",mount=\"%s\",hostname=\"%s\",required=\"%t\"} %d\n\n", prefix, name, mount, host, m.Required, btoi(m.Mounted)))
 	b.WriteString(fmt.Sprintf("# HELP %s_mount_responsive Probe file stat succeeded within timeout.\n", prefix))
 	b.WriteString(fmt.Sprintf("# TYPE %s_mount_responsive gauge\n", prefix))
-	b.WriteString(fmt.Sprintf("%s_mount_responsive{mount=\"%s\",probe=\"%s\",hostname=\"%s\"} %d\n\n", prefix, mount, probe, host, btoi(m.Responsive)))
+	b.WriteString(fmt.Sprintf("%s_mount_responsive{name=\"%s\",mount=\"%s\",probe=\"%s\",hostname=\"%s\",required=\"%t\"} %d\n\n", prefix, name, mount, probe, host, m.Required, btoi(m.Responsive)))
+	b.WriteString(fmt.Sprintf("# HELP %s_mount_fstype_match Filesystem type matches expected_fstype when configured.\n", prefix))
+	b.WriteString(fmt.Sprintf("# TYPE %s_mount_fstype_match gauge\n", prefix))
+	b.WriteString(fmt.Sprintf("%s_mount_fstype_match{name=\"%s\",mount=\"%s\",hostname=\"%s\",expected=\"%s\",actual=\"%s\",required=\"%t\"} %d\n\n",
+		prefix, name, mount, host, sanitizePromLabel(m.ExpectedFSType), sanitizePromLabel(m.ActualFSType), m.Required, btoi(m.FSTypeMatches)))
 	b.WriteString(fmt.Sprintf("# HELP %s_mount_probe_latency_seconds Probe stat latency in seconds.\n", prefix))
 	b.WriteString(fmt.Sprintf("# TYPE %s_mount_probe_latency_seconds gauge\n", prefix))
-	b.WriteString(fmt.Sprintf("%s_mount_probe_latency_seconds{mount=\"%s\",probe=\"%s\",hostname=\"%s\"} %.6f\n", prefix, mount, probe, host, lat))
+	b.WriteString(fmt.Sprintf("%s_mount_probe_latency_seconds{name=\"%s\",mount=\"%s\",probe=\"%s\",hostname=\"%s\"} %.6f\n", prefix, name, mount, probe, host, lat))
 
 	if compat && m.MountPath == "/home" {
 		b.WriteString("\n# HELP mount_home_ok Ceph /home mount status (1=mounted, 0=not mounted)\n")

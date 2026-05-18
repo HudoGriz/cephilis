@@ -143,11 +143,12 @@ func TestMountPromNoCompat(t *testing.T) {
 
 func TestMountTable(t *testing.T) {
 	m := model.MountResult{
-		Hostname:   "node1",
-		MountPath:  "/mnt/ceph",
-		ProbeFile:  "/mnt/ceph/.probe",
-		Mounted:    true,
-		Responsive: true,
+		Hostname:      "node1",
+		MountPath:     "/mnt/ceph",
+		ProbeFile:     "/mnt/ceph/.probe",
+		Mounted:       true,
+		Responsive:    true,
+		FSTypeMatches: true,
 	}
 	out, err := Mount("table", m, false)
 	if err != nil {

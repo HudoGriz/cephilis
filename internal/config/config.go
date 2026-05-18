@@ -6,7 +6,7 @@
 //
 //   - mounts.yaml    — list of mounts to health-check (path, probe, timeout)
 //   - sections.yaml  — list of directories to measure for size, plus
-//                      per-file options like the worker pool size
+//     per-file options like the worker pool size
 //
 // The configuration directory is resolved in this order:
 //
@@ -54,14 +54,17 @@ type Section struct {
 }
 
 // Mount is one mountpoint to health-check.  Probe is the sentinel file stat'd
-// to measure responsiveness; Timeout bounds both the mountpoint(1) and stat(1)
-// sub-processes.  Legacy=true opts this mount into compat Prometheus metrics.
+// to measure responsiveness; Timeout bounds both the mountpoint(1), stat(1),
+// and filesystem type probes.  Required mounts are retained even when their
+// path is missing so health checks can fail loudly.
 type Mount struct {
-	Name    string `yaml:"name"`
-	Path    string `yaml:"path"`
-	Probe   string `yaml:"probe"`
-	Timeout int    `yaml:"timeout,omitempty"`
-	Legacy  bool   `yaml:"legacy,omitempty"`
+	Name           string `yaml:"name"`
+	Path           string `yaml:"path"`
+	Probe          string `yaml:"probe"`
+	Timeout        int    `yaml:"timeout,omitempty"`
+	Required       bool   `yaml:"required,omitempty"`
+	ExpectedFSType string `yaml:"expected_fstype,omitempty"`
+	Legacy         bool   `yaml:"legacy,omitempty"`
 }
 
 // SectionsConfig is the parsed sections.yaml.
@@ -100,8 +103,9 @@ func ResolveConfigDir(cliDir string) (string, error) {
 }
 
 // LoadMounts reads mounts.yaml from path.  path may be the YAML file itself or
-// the enclosing config directory.  Mounts whose Path does not exist on this
-// host are silently skipped with a warning to stderr.
+// the enclosing config directory.  Optional mounts whose Path does not exist on
+// this host are skipped with a warning; required mounts are retained so the
+// health check can report a hard failure.
 func LoadMounts(path string) (MountsConfig, error) {
 	file, err := resolveFile(path, MountsFilename)
 	if err != nil {
@@ -132,6 +136,7 @@ func LoadMounts(path string) (MountsConfig, error) {
 		}
 		m.Path = filepath.Clean(m.Path)
 		m.Probe = filepath.Clean(m.Probe)
+		m.ExpectedFSType = strings.TrimSpace(m.ExpectedFSType)
 		if m.Timeout <= 0 {
 			m.Timeout = DefaultMountTimeoutSeconds
 		}
@@ -140,6 +145,8 @@ func LoadMounts(path string) (MountsConfig, error) {
 	filtered := make([]Mount, 0, len(cfg.Mounts))
 	for _, m := range cfg.Mounts {
 		if _, statErr := os.Stat(m.Path); statErr == nil {
+			filtered = append(filtered, m)
+		} else if m.Required {
 			filtered = append(filtered, m)
 		} else {
 			fmt.Fprintf(os.Stderr, "warning: skipping mount %q: path %s does not exist\n", m.Name, m.Path)

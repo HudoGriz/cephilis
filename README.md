@@ -27,29 +27,46 @@ sudo make install
 
 ```bash
 cephilis version
-cephilis space --format table --config ./config/paths.yaml
+cephilis space --format table --config ./config/sections.yaml
 cephilis mount --format prom
-cephilis all   --format prom --config ./config/paths.yaml
+cephilis health --mount home
+cephilis all   --format prom --config-dir ./config
 ```
 
 Run any sub-command with `--help` for full flag documentation.
 
 ## Config
 
-Default search order:
+Default config directory search order:
 
-1. `/etc/cephilis/paths.yaml`
-2. `config/paths.yaml`
+1. `/etc/cephilis`
+2. `config`
 
-Example file:
+`mounts.yaml` declares mount health checks. Required mounts are retained even
+when the path is missing, so Slurm wrappers can fail closed:
 
 ```yaml
+mounts:
+  - name: home
+    path: /home
+    probe: /home/.probe
+    timeout: 3
+    required: true
+    expected_fstype: ceph
+```
+
+`sections.yaml` declares CephFS xattr space scans:
+
+```yaml
+workers: 16
 sections:
   - name: Home Users
     path: /home
-  - name: Data Folders
-    path: /home/Data
 ```
+
+`cephilis health` exits nonzero when required mounts are unhealthy. Slurm
+prolog, epilog, and HealthCheckProgram wrappers should call it and keep Slurm
+actions such as drain, release, and bounded requeue in shell.
 
 ## Systemd deployment
 

@@ -37,6 +37,16 @@ func TestCheckDefaultsTimeout(t *testing.T) {
 	}
 }
 
+func TestRequiredMissingMountIsUnhealthy(t *testing.T) {
+	result := Check(config.Mount{Name: "home", Path: "/nonexistent/xyz", Probe: "/nonexistent/probe", Required: true, Timeout: 1})
+	if !result.Required {
+		t.Fatal("expected required flag in result")
+	}
+	if Healthy(result) {
+		t.Fatal("expected missing required mount to be unhealthy")
+	}
+}
+
 func TestCheckMountedNonExistentPath(t *testing.T) {
 	mounted, err := checkMounted("/nonexistent/path/xyz", 2)
 	if err != nil {

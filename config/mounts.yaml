@@ -4,10 +4,14 @@
 # - probe:   sentinel file stat'd to measure responsiveness
 #            (create with `cephilis init --create-probes`, or `touch` manually)
 # - timeout: seconds allowed for mountpoint(1) and stat(1); default 3
+# - required: if true, missing/unhealthy mount makes `cephilis health` fail
+# - expected_fstype: optional stat -f -c %T value, for example ceph
 # - legacy:  emit legacy mount_home_* metrics (opt-in compat)
 mounts:
   - name: home
     path: /home
     probe: /home/.probe
     timeout: 3
+    required: true
+    expected_fstype: ceph
     legacy: true

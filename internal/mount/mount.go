@@ -30,9 +30,13 @@ func Check(m config.Mount) model.MountResult {
 	}
 
 	base := model.MountResult{
-		Hostname:  hostname,
-		MountPath: m.Path,
-		ProbeFile: m.Probe,
+		Name:           m.Name,
+		Hostname:       hostname,
+		MountPath:      m.Path,
+		ProbeFile:      m.Probe,
+		Required:       m.Required,
+		ExpectedFSType: m.ExpectedFSType,
+		FSTypeMatches:  m.ExpectedFSType == "",
 	}
 
 	mounted, mountErr := checkMounted(m.Path, timeoutSec)
@@ -44,22 +48,34 @@ func Check(m config.Mount) model.MountResult {
 		base.Error = fmt.Sprintf("mount path is not mounted: %s", m.Path)
 		return base
 	}
+	base.Mounted = true
+
+	fstype, fsErr := checkFSType(m.Path, timeoutSec)
+	if fsErr != nil {
+		base.Error = fsErr.Error()
+		return base
+	}
+	base.ActualFSType = fstype
+	if m.ExpectedFSType != "" {
+		base.FSTypeMatches = strings.EqualFold(fstype, m.ExpectedFSType)
+		if !base.FSTypeMatches {
+			base.Error = fmt.Sprintf("mount %s fstype mismatch: got %s, want %s", m.Path, fstype, m.ExpectedFSType)
+			return base
+		}
+	}
 
 	start := time.Now()
 	responsive, probeErr := checkProbe(m.Probe, timeoutSec)
 	if probeErr != nil {
-		base.Mounted = true
 		base.Error = probeErr.Error()
 		return base
 	}
 	if !responsive {
-		base.Mounted = true
 		base.Error = "probe check failed"
 		return base
 	}
 
 	latency := time.Since(start).Seconds()
-	base.Mounted = true
 	base.Responsive = true
 	base.LatencySeconds = &latency
 	return base
@@ -107,4 +123,35 @@ func checkProbe(path string, timeoutSec int) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// checkFSType invokes stat(1) with a deadline and returns the filesystem type
+// token, for example "ceph".
+func checkFSType(path string, timeoutSec int) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "stat", "-f", "-c", "%T", path)
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("fstype check timed out after %ds: %s", timeoutSec, path)
+		}
+		return "", fmt.Errorf("fstype check failed for %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// Healthy reports whether r satisfies the health contract for its mount.
+func Healthy(r model.MountResult) bool {
+	return r.Mounted && r.Responsive && r.FSTypeMatches && r.Error == ""
+}
+
+// RequiredHealthy reports whether all required mount results are healthy.
+func RequiredHealthy(results []model.MountResult) bool {
+	for _, r := range results {
+		if r.Required && !Healthy(r) {
+			return false
+		}
+	}
+	return true
 }

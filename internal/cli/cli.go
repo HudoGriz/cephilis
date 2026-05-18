@@ -19,6 +19,7 @@ import (
 	"github.com/HudoGriz/cephilis/internal/config"
 	"github.com/HudoGriz/cephilis/internal/format"
 	"github.com/HudoGriz/cephilis/internal/model"
+	"github.com/HudoGriz/cephilis/internal/monitor"
 	"github.com/HudoGriz/cephilis/internal/mount"
 )
 
@@ -38,6 +39,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runSpace(args[1:], stdout, stderr)
 	case "mount":
 		return runMount(args[1:], stdout, stderr)
+	case "health":
+		return runHealth(args[1:], stdout, stderr)
 	case "all":
 		return runAll(args[1:], stdout, stderr)
 	case "init":
@@ -63,8 +66,44 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  init     Write config templates and create probe files")
 	fmt.Fprintln(out, "  space    Report directory space usage via CephFS xattrs")
 	fmt.Fprintln(out, "  mount    Check CephFS mount health and export metrics")
+	fmt.Fprintln(out, "  health   Exit nonzero when required mounts are unhealthy")
 	fmt.Fprintln(out, "  all      Run both space and mount checks")
 	fmt.Fprintln(out, "  version  Print version and exit")
+}
+
+func runHealth(args []string, stdout, stderr io.Writer) error {
+	if hasHelpArg(args) {
+		fmt.Fprintln(stdout, "Usage: cephilis health [--config-dir DIR] [--config FILE] [--mount NAME]")
+		return nil
+	}
+	fs := flag.NewFlagSet("health", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configDir := fs.String("config-dir", "", "Config directory")
+	configFile := fs.String("config", "", "Path to mounts.yaml")
+	mountName := fs.String("mount", "", "Only this mount")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	mcfg, err := loadMounts(*configFile, *configDir)
+	if err != nil {
+		return err
+	}
+	mounts := mcfg.Mounts
+	if strings.TrimSpace(*mountName) != "" {
+		mounts = filterMount(mounts, *mountName)
+		if len(mounts) == 0 {
+			return fmt.Errorf("mount not found: %s", *mountName)
+		}
+	}
+	results := mount.CheckAll(mounts)
+	for _, r := range results {
+		if (r.Required || strings.TrimSpace(*mountName) != "") && !mount.Healthy(r) {
+			fmt.Fprintf(stdout, "ERROR: %s unhealthy: %s\n", r.Name, r.Error)
+			return fmt.Errorf("required mount health check failed")
+		}
+	}
+	fmt.Fprintln(stdout, "OK: required mounts are healthy")
+	return nil
 }
 
 func runSpace(args []string, stdout, stderr io.Writer) error {
@@ -224,6 +263,7 @@ func runAll(args []string, stdout, stderr io.Writer) error {
 		}
 		fmt.Fprint(stdout, mo)
 		fmt.Fprint(stdout, so)
+		fmt.Fprint(stdout, monitor.Prom(monitor.Collect()))
 		return nil
 	case "json":
 		so, err := format.Space("json", space)
@@ -421,12 +461,16 @@ const mountsTemplate = `# cephilis mounts.yaml
 # - path:    filesystem path expected to be a mountpoint
 # - probe:   sentinel file stat'd to measure responsiveness (will be created by "cephilis init --create-probes")
 # - timeout: seconds allowed for mountpoint(1) and stat(1); default 3
+# - required: if true, missing/unhealthy mount makes cephilis health fail
+# - expected_fstype: optional stat -f -c %T value, for example ceph
 # - legacy:  emit legacy mount_home_* metrics (opt-in compat)
 mounts:
   - name: home
     path: /home
     probe: /home/.probe
     timeout: 3
+    required: true
+    expected_fstype: ceph
 `
 
 const sectionsTemplate = `# cephilis sections.yaml

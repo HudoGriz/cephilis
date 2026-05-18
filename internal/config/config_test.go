@@ -138,6 +138,23 @@ func TestLoadMountsHappyPath(t *testing.T) {
 	}
 }
 
+func TestLoadMountsRequiredMissingIsRetained(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, MountsFilename)
+	writeFile(t, cfgFile, "mounts:\n  - name: home\n    path: /nonexistent/required\n    probe: /nonexistent/required/.probe\n    required: true\n    expected_fstype: ceph\n")
+
+	cfg, err := LoadMounts(cfgFile)
+	if err != nil {
+		t.Fatalf("LoadMounts error: %v", err)
+	}
+	if len(cfg.Mounts) != 1 {
+		t.Fatalf("expected required missing mount to remain, got %d", len(cfg.Mounts))
+	}
+	if !cfg.Mounts[0].Required || cfg.Mounts[0].ExpectedFSType != "ceph" {
+		t.Fatalf("unexpected mount config: %+v", cfg.Mounts[0])
+	}
+}
+
 func TestLoadMountsMissingField(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, MountsFilename)

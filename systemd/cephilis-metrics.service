@@ -13,6 +13,7 @@ Environment="CEPHILIS_BIN=/usr/local/bin/cephilis"
 Environment="CEPHILIS_ARGS=all --format prom"
 Environment="CEPHILIS_OUTPUT_DIR=/var/lib/node_exporter/textfile_collector"
 Environment="CEPHILIS_OUTPUT_FILE=cephilis.prom"
+ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root "${CEPHILIS_OUTPUT_DIR}"
 ExecStart=/bin/sh -c '"${CEPHILIS_BIN}" ${CEPHILIS_ARGS} > "${CEPHILIS_OUTPUT_DIR}/${CEPHILIS_OUTPUT_FILE}.tmp" && mv "${CEPHILIS_OUTPUT_DIR}/${CEPHILIS_OUTPUT_FILE}.tmp" "${CEPHILIS_OUTPUT_DIR}/${CEPHILIS_OUTPUT_FILE}"'
 
 TimeoutStartSec=15
