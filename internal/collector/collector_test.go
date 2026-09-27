@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/HudoGriz/cephilis/internal/config"
 )
 
 func TestListSubdirsEmpty(t *testing.T) {
@@ -51,24 +53,20 @@ func TestListSubdirsNonExistentPermission(t *testing.T) {
 	}
 }
 
-func TestFallbackDU(t *testing.T) {
-	dir := t.TempDir()
-	// Write a small file so du has something to count.
-	if err := os.WriteFile(filepath.Join(dir, "data"), make([]byte, 1024), 0o644); err != nil {
-		t.Fatal(err)
+func TestScanAllKeepsGoingPastFailedSections(t *testing.T) {
+	// A plain temp dir has no ceph.dir.* xattrs, so every section fails; the
+	// scan must still return one result per section instead of aborting.
+	sections := []config.Section{
+		{Name: "missing", Path: "/nonexistent/path/xyz"},
+		{Name: "not ceph", Path: t.TempDir()},
 	}
-	size, err := fallbackDU(dir)
-	if err != nil {
-		t.Fatalf("fallbackDU error: %v", err)
+	got := ScanAll(sections, 2)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(got))
 	}
-	if size <= 0 {
-		t.Errorf("expected size > 0, got %d", size)
-	}
-}
-
-func TestFallbackDUNonExistent(t *testing.T) {
-	_, err := fallbackDU("/nonexistent/path/xyz")
-	if err == nil {
-		t.Fatal("expected error for non-existent path")
+	for _, r := range got {
+		if r.Err == nil {
+			t.Errorf("section %q: expected Err, got nil", r.Name)
+		}
 	}
 }

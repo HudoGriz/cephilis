@@ -9,7 +9,7 @@ import (
 
 // Collector scans a set of configured sections and returns per-section results.
 type Collector interface {
-	ScanAll(sections []config.Section, maxWorkers int) ([]model.SectionResult, error)
+	ScanAll(sections []config.Section, maxWorkers int) []model.SectionResult
 }
 
 // Prober checks whether one or more CephFS mounts are healthy and responsive.

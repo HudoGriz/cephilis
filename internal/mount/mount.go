@@ -38,6 +38,10 @@ func Check(m config.Mount) model.MountResult {
 		ExpectedFSType: m.ExpectedFSType,
 		FSTypeMatches:  m.ExpectedFSType == "",
 	}
+	if strings.TrimSpace(base.ProbeFile) == "" {
+		base.Error = "probe is not configured for legacy mount check"
+		return base
+	}
 
 	mounted, mountErr := checkMounted(m.Path, timeoutSec)
 	if mountErr != nil {

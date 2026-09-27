@@ -2,6 +2,7 @@ package format
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -29,6 +30,29 @@ func TestSpacePromContainsMetrics(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("prom output missing %q", want)
 		}
+	}
+}
+
+func TestSpacePromSectionMetrics(t *testing.T) {
+	results := append([]model.SectionResult{}, testResults...)
+	results = append(results, model.SectionResult{Name: "Gone", ParentPath: "/home/gone", Err: errors.New("enoent")})
+	out, err := Space("prom", results)
+	if err != nil {
+		t.Fatalf("Space(prom) error: %v", err)
+	}
+	for _, want := range []string{
+		`cephilis_section_scan_ok{section="gone",parent="/home/gone"} 0`,
+		`cephilis_section_scan_ok{section="home_users",parent="/home"} 1`,
+		`cephilis_section_size_bytes{section="home_users",parent="/home"}`,
+		`cephilis_section_files_total{section="home_users",parent="/home"}`,
+		`cephilis_section_failed_dirs{section="home_users",parent="/home"} 0`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("prom output missing %q", want)
+		}
+	}
+	if strings.Contains(out, `cephilis_section_size_bytes{section="gone"`) {
+		t.Error("failed section must not report a size")
 	}
 }
 

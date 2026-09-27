@@ -63,3 +63,16 @@ groups:
         annotations:
           summary: "cephilis collector {{ $labels.collector }} failed"
           description: "A cephilis collector has failed for at least five minutes."
+
+      # Raised by slurm_unkillable_step.sh (node_exporter textfile collector) when
+      # slurmd hits an unkillable step (slurmstepd wedged on a hung /home). The node
+      # is drained and will NOT self-recover — reboot it (IPMI) to clear the stuck
+      # COMPLETING jobs. Auto-clears when health_check_wrapper.sh sees /home healthy.
+      - alert: SlurmNodeUnkillableStep
+        expr: slurm_node_unkillable_step == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Slurm node {{ $labels.instance }} has an unkillable step - needs manual reboot"
+          description: "slurmstepd is wedged (slurm_job {{ $labels.slurm_job }}, home_unhealthy={{ $labels.home_unhealthy }}) on {{ $labels.instance }}. The node is drained and will not self-recover; reboot via IPMI to clear the stuck COMPLETING jobs."

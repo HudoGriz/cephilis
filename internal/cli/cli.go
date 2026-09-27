@@ -57,23 +57,23 @@ func Run(args []string, stdout, stderr io.Writer) error {
 }
 
 func printRootHelp(out io.Writer) {
-	fmt.Fprintln(out, "cephilis - HPC storage goblin")
+	fmt.Fprintln(out, "cephilis - HPC storage monitor")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  cephilis <command> [options]")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Commands:")
-	fmt.Fprintln(out, "  init     Write config templates and create probe files")
+	fmt.Fprintln(out, "  init     Write config templates")
 	fmt.Fprintln(out, "  space    Report directory space usage via CephFS xattrs")
 	fmt.Fprintln(out, "  mount    Check CephFS mount health and export metrics")
-	fmt.Fprintln(out, "  health   Exit nonzero when required mounts are unhealthy")
+	fmt.Fprintln(out, "  health   Safe CephFS client health for Slurm, Prometheus, or JSON")
 	fmt.Fprintln(out, "  all      Run both space and mount checks")
 	fmt.Fprintln(out, "  version  Print version and exit")
 }
 
 func runHealth(args []string, stdout, stderr io.Writer) error {
 	if hasHelpArg(args) {
-		fmt.Fprintln(stdout, "Usage: cephilis health [--config-dir DIR] [--config FILE] [--mount NAME]")
+		fmt.Fprintln(stdout, "Usage: cephilis health [--config-dir DIR] [--config FILE] [--mount NAME_OR_PATH] [--mode slurm|prom|json]")
 		return nil
 	}
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
@@ -81,28 +81,52 @@ func runHealth(args []string, stdout, stderr io.Writer) error {
 	configDir := fs.String("config-dir", "", "Config directory")
 	configFile := fs.String("config", "", "Path to mounts.yaml")
 	mountName := fs.String("mount", "", "Only this mount")
+	mode := fs.String("mode", "slurm", "Output mode: slurm, prom, json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	mcfg, err := loadMounts(*configFile, *configDir)
+
+	mounts := []config.Mount{}
+	mountArg := strings.TrimSpace(*mountName)
+	if strings.HasPrefix(mountArg, "/") {
+		mounts = []config.Mount{{
+			Name:           strings.Trim(filepath.Base(filepath.Clean(mountArg)), "/"),
+			Path:           mountArg,
+			Required:       true,
+			ExpectedFSType: "ceph",
+		}}
+		if mounts[0].Name == "" {
+			mounts[0].Name = "mount"
+		}
+	} else {
+		mcfg, err := loadMounts(*configFile, *configDir)
+		if err != nil {
+			return err
+		}
+		mounts = mcfg.Mounts
+		if mountArg != "" {
+			mounts = filterMount(mounts, mountArg)
+			if len(mounts) == 0 {
+				return fmt.Errorf("mount not found: %s", mountArg)
+			}
+		}
+	}
+
+	results := mount.CheckHealthAll(mounts)
+	output, err := renderHealth(*mode, results)
 	if err != nil {
 		return err
 	}
-	mounts := mcfg.Mounts
-	if strings.TrimSpace(*mountName) != "" {
-		mounts = filterMount(mounts, *mountName)
-		if len(mounts) == 0 {
-			return fmt.Errorf("mount not found: %s", *mountName)
-		}
-	}
-	results := mount.CheckAll(mounts)
+	fmt.Fprint(stdout, output)
+
 	for _, r := range results {
-		if (r.Required || strings.TrimSpace(*mountName) != "") && !mount.Healthy(r) {
-			fmt.Fprintf(stdout, "ERROR: %s unhealthy: %s\n", r.Name, r.Error)
+		if !r.Healthy {
+			if *mode == "prom" {
+				return nil
+			}
 			return fmt.Errorf("required mount health check failed")
 		}
 	}
-	fmt.Fprintln(stdout, "OK: required mounts are healthy")
 	return nil
 }
 
@@ -151,8 +175,8 @@ func runSpace(args []string, stdout, stderr io.Writer) error {
 	}
 
 	start := time.Now()
-	results, err := collector.ScanAll(sections, w)
-	if err != nil {
+	results := collector.ScanAll(sections, w)
+	if err := reportSpaceErrors(results, stderr); err != nil {
 		return err
 	}
 
@@ -163,6 +187,26 @@ func runSpace(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprint(stdout, out)
 	if *formatName == "table" {
 		fmt.Fprintf(stdout, "Completed in %.1f seconds\n", time.Since(start).Seconds())
+	}
+	return nil
+}
+
+// reportSpaceErrors logs failed sections and skipped directories to stderr.
+// It returns an error only when every section failed, so a partial scan still
+// produces output (failures are visible as cephilis_section_scan_ok 0).
+func reportSpaceErrors(results []model.SectionResult, stderr io.Writer) error {
+	log := slog.New(slog.NewTextHandler(stderr, nil))
+	failed := 0
+	for _, r := range results {
+		if r.Err != nil {
+			failed++
+			log.Error("section scan failed", "section", r.Name, "path", r.ParentPath, "err", r.Err)
+		} else if r.FailedDirs > 0 {
+			log.Warn("skipped unreadable directories", "section", r.Name, "count", r.FailedDirs)
+		}
+	}
+	if len(results) > 0 && failed == len(results) {
+		return fmt.Errorf("all %d sections failed", failed)
 	}
 	return nil
 }
@@ -243,19 +287,17 @@ func runAll(args []string, stdout, stderr io.Writer) error {
 		w = scfg.Workers
 	}
 
-	mounts := mount.CheckAll(mcfg.Mounts)
-	space, err := collector.ScanAll(scfg.Sections, w)
-	if err != nil {
+	health := mount.CheckHealthAll(mcfg.Mounts)
+	space := collector.ScanAll(scfg.Sections, w)
+	if err := reportSpaceErrors(space, stderr); err != nil {
 		return err
 	}
 
-	compat := config.BoolEnv("CEPHILIS_COMPAT_MOUNT_METRICS", false)
-
 	switch *formatName {
 	case "prom":
-		mo, err := renderMounts("prom", mounts, compat)
+		mo, err := renderHealth("prom", health)
 		if err != nil {
-			return fmt.Errorf("format mount: %w", err)
+			return fmt.Errorf("format health: %w", err)
 		}
 		so, err := format.Space("prom", space)
 		if err != nil {
@@ -271,9 +313,9 @@ func runAll(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("format space: %w", err)
 		}
 		payload := struct {
-			Mounts []model.MountResult `json:"mounts"`
-			Space  json.RawMessage     `json:"space"`
-		}{Mounts: mounts, Space: json.RawMessage(so)}
+			Health []model.HealthResult `json:"health"`
+			Space  json.RawMessage      `json:"space"`
+		}{Health: health, Space: json.RawMessage(so)}
 		b, err := json.MarshalIndent(payload, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal json: %w", err)
@@ -281,9 +323,9 @@ func runAll(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, string(b))
 		return nil
 	default:
-		mo, err := renderMounts("table", mounts, compat)
+		mo, err := renderHealth("slurm", health)
 		if err != nil {
-			return fmt.Errorf("format mount: %w", err)
+			return fmt.Errorf("format health: %w", err)
 		}
 		so, err := format.Space("table", space)
 		if err != nil {
@@ -298,10 +340,9 @@ func runAll(args []string, stdout, stderr io.Writer) error {
 
 func runInit(args []string, stdout, stderr io.Writer) error {
 	if hasHelpArg(args) {
-		fmt.Fprintln(stdout, "Usage: cephilis init [--config-dir DIR] [--force] [--create-probes]")
+		fmt.Fprintln(stdout, "Usage: cephilis init [--config-dir DIR] [--force]")
 		fmt.Fprintln(stdout, "")
 		fmt.Fprintln(stdout, "Writes mounts.yaml and sections.yaml templates.")
-		fmt.Fprintln(stdout, "With --create-probes, touches every probe file declared in mounts.yaml.")
 		return nil
 	}
 
@@ -309,7 +350,6 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	configDir := fs.String("config-dir", "", "Config directory to initialise (default: /etc/cephilis if root, else ./config)")
 	force := fs.Bool("force", false, "Overwrite existing config files")
-	createProbes := fs.Bool("create-probes", false, "Touch probe files declared in mounts.yaml")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -338,22 +378,6 @@ func runInit(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "wrote %s\n", sectionsPath)
 
-	if *createProbes {
-		mcfg, err := config.LoadMounts(mountsPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "warning: could not load mounts for probe creation: %v\n", err)
-			return nil
-		}
-		for _, m := range mcfg.Mounts {
-			if err := touchProbe(m.Probe); err != nil {
-				fmt.Fprintf(stderr, "warning: touch probe %s: %v\n", m.Probe, err)
-				continue
-			}
-			fmt.Fprintf(stdout, "touched probe %s\n", m.Probe)
-		}
-	} else {
-		fmt.Fprintln(stdout, "(pass --create-probes to also create probe sentinel files)")
-	}
 	return nil
 }
 
@@ -362,20 +386,6 @@ func writeTemplate(path, content string, force bool) error {
 		return fmt.Errorf("%s already exists (pass --force to overwrite)", path)
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
-}
-
-func touchProbe(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	return f.Close()
 }
 
 // renderMounts renders a slice of MountResult in the requested format,
@@ -402,6 +412,93 @@ func renderMounts(formatName string, results []model.MountResult, compat bool) (
 		}
 	}
 	return b.String(), nil
+}
+
+func renderHealth(mode string, results []model.HealthResult) (string, error) {
+	switch mode {
+	case "slurm":
+		var b strings.Builder
+		for _, r := range results {
+			if r.Healthy {
+				fmt.Fprintf(&b, "OK: %s CephFS client healthy\n", r.MountPath)
+			} else {
+				fmt.Fprintf(&b, "ERROR: %s CephFS client unhealthy: %s\n", r.MountPath, r.Error)
+			}
+		}
+		return b.String(), nil
+	case "json":
+		b, err := json.MarshalIndent(struct {
+			Health []model.HealthResult `json:"health"`
+		}{Health: results}, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(b) + "\n", nil
+	case "prom":
+		return healthProm(results), nil
+	default:
+		return "", fmt.Errorf("invalid health --mode %q (valid: slurm|prom|json)", mode)
+	}
+}
+
+func healthProm(results []model.HealthResult) string {
+	prefix := config.MetricsPrefix
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# HELP %s_health_ok Safe CephFS client health check result.\n", prefix))
+	b.WriteString(fmt.Sprintf("# TYPE %s_health_ok gauge\n", prefix))
+	for _, r := range results {
+		fmt.Fprintf(&b, "%s_health_ok{%s} %d\n", prefix, healthLabels(r), boolInt(r.Healthy))
+	}
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("# HELP %s_mount_up Mount point appears in local mount table.\n", prefix))
+	b.WriteString(fmt.Sprintf("# TYPE %s_mount_up gauge\n", prefix))
+	for _, r := range results {
+		fmt.Fprintf(&b, "%s_mount_up{%s} %d\n", prefix, healthLabels(r), boolInt(r.Mounted))
+	}
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("# HELP %s_mount_fstype_match Mount filesystem type matches expected_fstype.\n", prefix))
+	b.WriteString(fmt.Sprintf("# TYPE %s_mount_fstype_match gauge\n", prefix))
+	for _, r := range results {
+		fmt.Fprintf(&b, "%s_mount_fstype_match{%s} %d\n", prefix, healthLabels(r), boolInt(r.FSTypeMatches))
+	}
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("# HELP %s_cephfs_mds_session_open CephFS kernel client has an open MDS session.\n", prefix))
+	b.WriteString(fmt.Sprintf("# TYPE %s_cephfs_mds_session_open gauge\n", prefix))
+	for _, r := range results {
+		fmt.Fprintf(&b, "%s_cephfs_mds_session_open{%s} %d\n", prefix, healthLabels(r), boolInt(r.MDSSessionOpen))
+	}
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("# HELP %s_cephfs_session_unhealthy CephFS kernel client session contains stale/blocklisted/reconnect/closed state.\n", prefix))
+	b.WriteString(fmt.Sprintf("# TYPE %s_cephfs_session_unhealthy gauge\n", prefix))
+	for _, r := range results {
+		fmt.Fprintf(&b, "%s_cephfs_session_unhealthy{%s} %d\n", prefix, healthLabels(r), boolInt(r.UnhealthySession))
+	}
+	b.WriteString("\n")
+	for _, r := range results {
+		if r.Error != "" {
+			fmt.Fprintf(&b, "%s_health_error{%s,error=\"%s\"} 1\n", prefix, healthLabels(r), promLabel(r.Error))
+		}
+	}
+	return b.String()
+}
+
+func healthLabels(r model.HealthResult) string {
+	return fmt.Sprintf("name=\"%s\",mount=\"%s\",hostname=\"%s\",expected=\"%s\",actual=\"%s\"",
+		promLabel(r.Name), promLabel(r.MountPath), promLabel(r.Hostname), promLabel(r.ExpectedFSType), promLabel(r.ActualFSType))
+}
+
+func promLabel(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func loadSections(configFile, configDir string) (config.SectionsConfig, error) {
@@ -440,7 +537,7 @@ func filterMount(mounts []config.Mount, name string) []config.Mount {
 	needle := strings.ToLower(strings.TrimSpace(name))
 	out := make([]config.Mount, 0)
 	for _, m := range mounts {
-		if strings.ToLower(m.Name) == needle {
+		if strings.ToLower(m.Name) == needle || strings.ToLower(m.Path) == needle {
 			out = append(out, m)
 		}
 	}
@@ -457,18 +554,13 @@ func hasHelpArg(args []string) bool {
 }
 
 const mountsTemplate = `# cephilis mounts.yaml
-# Each entry is a mountpoint to health-check.
+# Each entry is a mountpoint to health-check safely via mount table + Ceph debugfs.
 # - path:    filesystem path expected to be a mountpoint
-# - probe:   sentinel file stat'd to measure responsiveness (will be created by "cephilis init --create-probes")
-# - timeout: seconds allowed for mountpoint(1) and stat(1); default 3
 # - required: if true, missing/unhealthy mount makes cephilis health fail
-# - expected_fstype: optional stat -f -c %T value, for example ceph
-# - legacy:  emit legacy mount_home_* metrics (opt-in compat)
+# - expected_fstype: optional expected mount-table filesystem type, for example ceph
 mounts:
   - name: home
     path: /home
-    probe: /home/.probe
-    timeout: 3
     required: true
     expected_fstype: ceph
 `

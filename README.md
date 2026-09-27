@@ -3,12 +3,13 @@
 [![CI](https://github.com/HudoGriz/cephilis/actions/workflows/ci.yml/badge.svg)](https://github.com/HudoGriz/cephilis/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A minimal, dependency-free CephFS space and mount exporter for HPC nodes.
+A minimal, dependency-free CephFS space and health exporter for HPC nodes.
 Produces Prometheus textfile metrics consumed by `node_exporter`.
 
 ## Goals
 
-- Single static binary — no runtime dependencies beyond common Linux tools (`mountpoint`, `stat`, `du`)
+- Single static binary
+- Safe CephFS client health checks for Slurm: no `/home` stat/list/probe
 - O(1) CephFS xattr queries — no filesystem traversal for space reporting
 - Prometheus textfile output for `node_exporter`
 
@@ -28,8 +29,9 @@ sudo make install
 ```bash
 cephilis version
 cephilis space --format table --config ./config/sections.yaml
-cephilis mount --format prom
-cephilis health --mount home
+cephilis health --mount /home --mode slurm
+cephilis health --mount /home --mode prom
+cephilis health --mount /home --mode json
 cephilis all   --format prom --config-dir ./config
 ```
 
@@ -42,15 +44,15 @@ Default config directory search order:
 1. `/etc/cephilis`
 2. `config`
 
-`mounts.yaml` declares mount health checks. Required mounts are retained even
-when the path is missing, so Slurm wrappers can fail closed:
+`mounts.yaml` declares safe health checks. Required mounts are retained even
+when the path is missing, so Slurm wrappers can fail closed. Health checks read
+the local mount table and Ceph kernel debugfs state; they do not stat/list/read
+or write the mount path:
 
 ```yaml
 mounts:
   - name: home
     path: /home
-    probe: /home/.probe
-    timeout: 3
     required: true
     expected_fstype: ceph
 ```
@@ -64,9 +66,22 @@ sections:
     path: /home
 ```
 
-`cephilis health` exits nonzero when required mounts are unhealthy. Slurm
-prolog, epilog, and HealthCheckProgram wrappers should call it and keep Slurm
-actions such as drain, release, and bounded requeue in shell.
+`cephilis health --mode slurm` exits nonzero when the selected mount is
+unhealthy. Slurm prolog and HealthCheckProgram wrappers should call it and keep
+Slurm actions such as drain/resume in shell.
+
+`--mode prom` prints Prometheus metrics and exits successfully when the
+collector ran, even if the health metric is `0`. `--mode json` is intended for
+debugging and tests.
+
+For safe non-invasive tests, the health checker can be pointed at fake local
+state:
+
+```bash
+CEPHILIS_MOUNTINFO_PATH=/tmp/fake-mountinfo \
+CEPHILIS_CEPH_DEBUGFS_GLOB='/tmp/fake-ceph-debug/*/mds_sessions' \
+cephilis health --mount /home --mode slurm
+```
 
 ## Systemd deployment
 

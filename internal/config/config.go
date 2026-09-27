@@ -4,7 +4,7 @@
 // Configuration is split across two YAML files inside a configuration
 // directory:
 //
-//   - mounts.yaml    — list of mounts to health-check (path, probe, timeout)
+//   - mounts.yaml    — list of mounts to health-check (path, expected_fstype)
 //   - sections.yaml  — list of directories to measure for size, plus
 //     per-file options like the worker pool size
 //
@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,9 +35,6 @@ const (
 	MountsFilename   = "mounts.yaml"
 	SectionsFilename = "sections.yaml"
 )
-
-// DefaultDUTimeout bounds the du(1) fallback when CephFS xattrs are missing.
-var DefaultDUTimeout = 300 * time.Second
 
 // DefaultConfigDirs is the ordered list of directories searched when the user
 // does not pass an explicit --config-dir.
@@ -53,10 +49,10 @@ type Section struct {
 	Path string `yaml:"path"`
 }
 
-// Mount is one mountpoint to health-check.  Probe is the sentinel file stat'd
-// to measure responsiveness; Timeout bounds both the mountpoint(1), stat(1),
-// and filesystem type probes.  Required mounts are retained even when their
-// path is missing so health checks can fail loudly.
+// Mount is one mountpoint to health-check. Probe is retained for the legacy
+// probe-based mount command; the safe health command does not require it.
+// Required mounts are retained even when their path is missing so health checks
+// can fail loudly.
 type Mount struct {
 	Name           string `yaml:"name"`
 	Path           string `yaml:"path"`
@@ -102,10 +98,9 @@ func ResolveConfigDir(cliDir string) (string, error) {
 		strings.Join(DefaultConfigDirs, ", "))
 }
 
-// LoadMounts reads mounts.yaml from path.  path may be the YAML file itself or
-// the enclosing config directory.  Optional mounts whose Path does not exist on
-// this host are skipped with a warning; required mounts are retained so the
-// health check can report a hard failure.
+// LoadMounts reads mounts.yaml from path. path may be the YAML file itself or
+// the enclosing config directory. It deliberately does not stat configured
+// mount paths; a wedged CephFS mount can make path metadata operations block.
 func LoadMounts(path string) (MountsConfig, error) {
 	file, err := resolveFile(path, MountsFilename)
 	if err != nil {
@@ -131,31 +126,17 @@ func LoadMounts(path string) (MountsConfig, error) {
 		if m.Path == "" {
 			return MountsConfig{}, fmt.Errorf("mount %q is missing 'path'", m.Name)
 		}
-		if m.Probe == "" {
-			return MountsConfig{}, fmt.Errorf("mount %q is missing 'probe'", m.Name)
-		}
 		m.Path = filepath.Clean(m.Path)
-		m.Probe = filepath.Clean(m.Probe)
+		if m.Probe != "" {
+			m.Probe = filepath.Clean(m.Probe)
+		}
 		m.ExpectedFSType = strings.TrimSpace(m.ExpectedFSType)
 		if m.Timeout <= 0 {
 			m.Timeout = DefaultMountTimeoutSeconds
 		}
 	}
 
-	filtered := make([]Mount, 0, len(cfg.Mounts))
-	for _, m := range cfg.Mounts {
-		if _, statErr := os.Stat(m.Path); statErr == nil {
-			filtered = append(filtered, m)
-		} else if m.Required {
-			filtered = append(filtered, m)
-		} else {
-			fmt.Fprintf(os.Stderr, "warning: skipping mount %q: path %s does not exist\n", m.Name, m.Path)
-		}
-	}
-	if len(filtered) == 0 {
-		return MountsConfig{}, errors.New("no configured mount paths exist on this host")
-	}
-	return MountsConfig{Mounts: filtered}, nil
+	return cfg, nil
 }
 
 // LoadSections reads sections.yaml from path (file or enclosing directory).

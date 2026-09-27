@@ -1,17 +1,16 @@
 // Package collector scans CephFS directories for space and file-count
 // statistics.  It first attempts to read CephFS extended attributes
-// (ceph.dir.rbytes, ceph.dir.rfiles, ceph.dir.rsubdirs) for O(1) queries,
-// and falls back to du(1) when those attributes are unavailable.
+// (ceph.dir.rbytes, ceph.dir.rfiles, ceph.dir.rsubdirs) for O(1) queries.
+// There is deliberately no du(1) fallback: walking a multi-PB tree takes hours
+// and blocks in D-state on a CephFS brownout.
 package collector
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -30,22 +29,24 @@ var (
 )
 
 // ScanAll scans each section sequentially and returns one SectionResult per
-// section.  It stops and propagates the first error encountered.
-func ScanAll(sections []config.Section, maxWorkers int) ([]model.SectionResult, error) {
+// section.  A failing section is returned with Err set instead of aborting
+// the scan, so one moved or unreadable path does not blank the whole report.
+func ScanAll(sections []config.Section, maxWorkers int) []model.SectionResult {
 	results := make([]model.SectionResult, 0, len(sections))
 	for _, section := range sections {
 		res, err := ScanSection(section, maxWorkers)
 		if err != nil {
-			return nil, err
+			res = model.SectionResult{Name: section.Name, ParentPath: section.Path, Err: err}
 		}
 		results = append(results, res)
 	}
-	return results, nil
+	return results
 }
 
 // ScanSection scans the section root and all immediate subdirectories using a
 // worker pool of up to maxWorkers goroutines.  Entries in the returned
-// SectionResult are sorted descending by RBytes.
+// SectionResult are sorted descending by RBytes.  Subdirectories whose stats
+// cannot be read are skipped and counted in FailedDirs.
 func ScanSection(section config.Section, maxWorkers int) (model.SectionResult, error) {
 	if maxWorkers <= 0 {
 		maxWorkers = config.DefaultWorkers
@@ -98,9 +99,11 @@ func ScanSection(section config.Section, maxWorkers int) (model.SectionResult, e
 	}()
 
 	entries := make([]model.DirStats, 0, len(subdirs))
+	failed := 0
 	for o := range outs {
 		if o.err != nil {
-			return model.SectionResult{}, o.err
+			failed++
+			continue
 		}
 		entries = append(entries, o.stat)
 	}
@@ -112,11 +115,11 @@ func ScanSection(section config.Section, maxWorkers int) (model.SectionResult, e
 		ParentPath: section.Path,
 		Parent:     &parent,
 		Entries:    entries,
+		FailedDirs: failed,
 	}, nil
 }
 
-// cephStats returns DirStats for a single path, preferring CephFS xattrs and
-// falling back to du(1).
+// cephStats returns DirStats for a single path from CephFS xattrs.
 func cephStats(path string) (model.DirStats, error) {
 	name := filepath.Base(path)
 	if name == "" || name == "." || name == "/" {
@@ -124,23 +127,18 @@ func cephStats(path string) (model.DirStats, error) {
 	}
 
 	rbytes, err := getXAttrInt(path, xattrBytes)
-	if err == nil {
-		rfiles, filesErr := getXAttrInt(path, xattrFiles)
-		if filesErr != nil {
-			return model.DirStats{}, filesErr
-		}
-		rsubdirs, subErr := getXAttrInt(path, xattrSubdirs)
-		if subErr != nil {
-			rsubdirs = 0
-		}
-		return model.DirStats{Path: path, Name: name, RBytes: rbytes, RFiles: rfiles, RSubdirs: rsubdirs}, nil
+	if err != nil {
+		return model.DirStats{}, fmt.Errorf("read %s on %s (not CephFS?): %w", xattrBytes, path, err)
 	}
-
-	duSize, duErr := fallbackDU(path)
-	if duErr != nil {
-		return model.DirStats{}, duErr
+	rfiles, err := getXAttrInt(path, xattrFiles)
+	if err != nil {
+		return model.DirStats{}, fmt.Errorf("read %s on %s: %w", xattrFiles, path, err)
 	}
-	return model.DirStats{Path: path, Name: name, RBytes: duSize, RFiles: 0, RSubdirs: 0}, nil
+	rsubdirs, err := getXAttrInt(path, xattrSubdirs)
+	if err != nil {
+		rsubdirs = 0
+	}
+	return model.DirStats{Path: path, Name: name, RBytes: rbytes, RFiles: rfiles, RSubdirs: rsubdirs}, nil
 }
 
 // getXAttrInt reads a CephFS extended attribute and parses it as int64.
@@ -156,27 +154,6 @@ func getXAttrInt(path, attr string) (int64, error) {
 	v, parseErr := strconv.ParseInt(strings.TrimSpace(string(bytes.Trim(buf[:n], "\x00"))), 10, 64)
 	if parseErr != nil {
 		return 0, fmt.Errorf("parse xattr %s for %s: %w", attr, path, parseErr)
-	}
-	return v, nil
-}
-
-// fallbackDU invokes du -sb to measure directory size when CephFS xattrs are
-// unavailable.  It respects config.DefaultDUTimeout.
-func fallbackDU(path string) (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), config.DefaultDUTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "du", "-sb", path)
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, fmt.Errorf("du fallback failed for %s: %w", path, err)
-	}
-	fields := strings.Fields(string(out))
-	if len(fields) == 0 {
-		return 0, fmt.Errorf("du fallback empty output for %s", path)
-	}
-	v, parseErr := strconv.ParseInt(fields[0], 10, 64)
-	if parseErr != nil {
-		return 0, fmt.Errorf("du parse failed for %s: %w", path, parseErr)
 	}
 	return v, nil
 }

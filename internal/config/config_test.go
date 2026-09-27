@@ -120,7 +120,7 @@ func TestLoadMountsHappyPath(t *testing.T) {
 	}
 	cfgFile := filepath.Join(dir, MountsFilename)
 	writeFile(t, cfgFile,
-		"mounts:\n  - name: home\n    path: "+mountPath+"\n    probe: "+mountPath+"/.probe\n")
+		"mounts:\n  - name: home\n    path: "+mountPath+"\n")
 
 	cfg, err := LoadMounts(cfgFile)
 	if err != nil {
@@ -138,19 +138,19 @@ func TestLoadMountsHappyPath(t *testing.T) {
 	}
 }
 
-func TestLoadMountsRequiredMissingIsRetained(t *testing.T) {
+func TestLoadMountsMissingIsRetainedWithoutStat(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, MountsFilename)
-	writeFile(t, cfgFile, "mounts:\n  - name: home\n    path: /nonexistent/required\n    probe: /nonexistent/required/.probe\n    required: true\n    expected_fstype: ceph\n")
+	writeFile(t, cfgFile, "mounts:\n  - name: home\n    path: /nonexistent/required\n    required: false\n    expected_fstype: ceph\n")
 
 	cfg, err := LoadMounts(cfgFile)
 	if err != nil {
 		t.Fatalf("LoadMounts error: %v", err)
 	}
 	if len(cfg.Mounts) != 1 {
-		t.Fatalf("expected required missing mount to remain, got %d", len(cfg.Mounts))
+		t.Fatalf("expected missing mount to remain, got %d", len(cfg.Mounts))
 	}
-	if !cfg.Mounts[0].Required || cfg.Mounts[0].ExpectedFSType != "ceph" {
+	if cfg.Mounts[0].Path != "/nonexistent/required" || cfg.Mounts[0].ExpectedFSType != "ceph" {
 		t.Fatalf("unexpected mount config: %+v", cfg.Mounts[0])
 	}
 }
@@ -159,8 +159,12 @@ func TestLoadMountsMissingField(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, MountsFilename)
 	writeFile(t, cfgFile, "mounts:\n  - name: home\n    path: /tmp\n")
-	if _, err := LoadMounts(cfgFile); err == nil {
-		t.Fatal("expected error when probe is missing")
+	cfg, err := LoadMounts(cfgFile)
+	if err != nil {
+		t.Fatalf("LoadMounts should allow missing probe: %v", err)
+	}
+	if cfg.Mounts[0].Probe != "" {
+		t.Fatalf("expected empty probe, got %q", cfg.Mounts[0].Probe)
 	}
 }
 

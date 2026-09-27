@@ -88,6 +88,44 @@ func spaceProm(results []model.SectionResult) string {
 		}
 	}
 	b.WriteString("\n")
+
+	// Section level: scan status, skipped directories, and the section root's
+	// own recursive totals (includes files directly in the root).
+	sectionMetric := func(name, help string, value func(model.SectionResult) (int64, bool)) {
+		metric := config.MetricsPrefix + name
+		b.WriteString(fmt.Sprintf("# HELP %s %s\n", metric, help))
+		b.WriteString(fmt.Sprintf("# TYPE %s gauge\n", metric))
+		for _, section := range results {
+			v, ok := value(section)
+			if !ok {
+				continue
+			}
+			sec := sanitizePromLabel(strings.ToLower(strings.ReplaceAll(section.Name, " ", "_")))
+			b.WriteString(fmt.Sprintf("%s{section=\"%s\",parent=\"%s\"} %d\n", metric, sec, sanitizePromLabel(section.ParentPath), v))
+		}
+		b.WriteString("\n")
+	}
+	sectionMetric("_section_scan_ok", "Section root was scanned, 1 yes, 0 no.", func(s model.SectionResult) (int64, bool) {
+		if s.Err != nil {
+			return 0, true
+		}
+		return 1, true
+	})
+	sectionMetric("_section_failed_dirs", "Subdirectories skipped because their CephFS xattrs were unreadable.", func(s model.SectionResult) (int64, bool) {
+		return int64(s.FailedDirs), s.Err == nil
+	})
+	sectionMetric("_section_size_bytes", "Recursive size of the section root in bytes via CephFS xattr.", func(s model.SectionResult) (int64, bool) {
+		if s.Parent == nil {
+			return 0, false
+		}
+		return s.Parent.RBytes, true
+	})
+	sectionMetric("_section_files_total", "Recursive file count of the section root via CephFS xattr.", func(s model.SectionResult) (int64, bool) {
+		if s.Parent == nil {
+			return 0, false
+		}
+		return s.Parent.RFiles, true
+	})
 	return b.String()
 }
 
