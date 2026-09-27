@@ -1,0 +1,15 @@
+[Unit]
+Description=cephilis CephFS directory usage for Prometheus
+Documentation=https://github.com/HudoGriz/cephilis
+After=network-online.target
+
+[Service]
+Type=oneshot
+# One getxattr per directory (ceph.dir.rbytes/rfiles); no tree walk.
+# Run it on a single node: on a CephFS brownout it can block in D state, and a
+# oneshot unit is not relaunched while stuck (CephilisSpaceStale fires).
+ExecStart=/bin/sh -c 'd=/var/lib/node_exporter/textfile_collector; cephilis space --format prom > "$d/cephilis-space.prom.tmp" && mv "$d/cephilis-space.prom.tmp" "$d/cephilis-space.prom"'
+TimeoutStartSec=600
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/node_exporter/textfile_collector

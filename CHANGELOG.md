@@ -7,19 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed (074a0e7-space-20260927, deployed to all HPC nodes)
+## [0.2.0] - 2026-09-27
+
+Focus: cephilis is now a CephFS per-directory usage exporter with an optional
+D-safe client health check.
+
+### Added
+- Site-neutral Grafana dashboard `monitoring/grafana/dashboards/cephilis.json`:
+  folder tree with click-through drill-down, per-folder size/files/trend/
+  7-day growth, share-of-folder donut, scan status, client health.
+- `cephilis_section_scan_ok`, `cephilis_section_failed_dirs`,
+  `cephilis_section_size_bytes` and `cephilis_section_files_total`.
+- systemd units `cephilis-space.{service,timer}` (hourly) and
+  `cephilis-health.{service,timer}` (every minute).
+- Alert rules for unhealthy client, stale health metrics (hung client), and
+  stale or failed space scans.
+- RPM and DEB packages via GoReleaser (binary, units, example config,
+  dashboard and rules under `/usr/share/cephilis`).
+
+### Changed
 - `space`: a failing section or unreadable subdirectory no longer aborts the
   whole scan; failures are logged and exported. Exit status is non-zero only
   when every section fails, so partial results still reach Prometheus.
-- `space` prom output adds `cephilis_section_scan_ok`,
-  `cephilis_section_failed_dirs`, `cephilis_section_size_bytes` and
-  `cephilis_section_files_total` (section root totals).
-- `health` output is unchanged (verified byte-identical on cpu1 before rollout).
+- Unknown keys in `mounts.yaml` (`probe`, `timeout`, `legacy` from older
+  releases) are ignored, so existing configs keep working.
 
 ### Removed
-- `du -sb` fallback when CephFS xattrs are missing. Walking a multi-PB tree
-  takes hours and blocks in D-state on a CephFS brownout; a missing xattr is
-  now reported as an error instead.
+- `mount` sub-command: its probe-file `stat` on the mount blocks in D state
+  when CephFS hangs. Use `health`.
+- `all` sub-command and the `monitor` package (read the `caps` debugfs file,
+  which can deadlock the ceph kernel module under cap pressure, and shelled out
+  to `ceph`/`squeue`). Run `space` and `health` from their own units instead.
+- `cephilis-metrics.{service,timer}` (ran `all`).
+- `du -sb` fallback when CephFS xattrs are missing: walking a multi-PB tree
+  takes hours and blocks in D state on a CephFS brownout. A missing xattr is
+  now reported as an error.
+- Unused `internal/interfaces` package and `IntEnv`/`BoolEnv` helpers.
+
+## [0.1.0]
 
 ### Added
 - `health --mount <path> --mode slurm|prom|json` for safe Slurm/CephFS mount

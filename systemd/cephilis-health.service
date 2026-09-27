@@ -1,0 +1,10 @@
+[Unit]
+Description=cephilis CephFS client health for Prometheus
+Documentation=https://github.com/HudoGriz/cephilis
+
+[Service]
+Type=oneshot
+# Reads /proc/self/mountinfo and the kernel ceph debugfs session state only;
+# never touches the mount, so it keeps working while CephFS is hung.
+ExecStart=/bin/sh -c 'd=/var/lib/node_exporter/textfile_collector; cephilis health --mode prom > "$d/cephilis_health.prom.tmp" && mv "$d/cephilis_health.prom.tmp" "$d/cephilis_health.prom"'
+TimeoutStartSec=15

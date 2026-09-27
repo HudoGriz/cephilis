@@ -24,12 +24,37 @@ builds:
 archives:
   - id: cephilis
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format: tar.gz
+    formats: [tar.gz]
     files:
       - LICENSE
       - README.md
-      - config/paths.yaml
-      - systemd/
+      - CHANGELOG.md
+      - config/*.yaml
+      - systemd/*
+      - monitoring/**/*
+
+nfpms:
+  - id: cephilis
+    package_name: cephilis
+    homepage: https://github.com/HudoGriz/cephilis
+    maintainer: HudoGriz <blaz.vrhovsek95@gmail.com>
+    description: CephFS per-directory usage and D-safe client health exporter for Prometheus.
+    license: MIT
+    formats: [rpm, deb]
+    bindir: /usr/bin
+    contents:
+      - src: systemd/*
+        dst: /usr/lib/systemd/system/
+      - src: config/mounts.yaml
+        dst: /etc/cephilis/mounts.yaml
+        type: config|noreplace
+      - src: config/sections.yaml
+        dst: /etc/cephilis/sections.yaml
+        type: config|noreplace
+      - src: monitoring/grafana/dashboards/cephilis.json
+        dst: /usr/share/cephilis/grafana/cephilis.json
+      - src: monitoring/prometheus/cephilis-rules.yml
+        dst: /usr/share/cephilis/prometheus/cephilis-rules.yml
 
 checksum:
   name_template: "checksums.txt"
@@ -47,6 +72,6 @@ changelog:
 release:
   github:
     owner: HudoGriz
-    name: cephilis-go
+    name: cephilis
   draft: false
   prerelease: auto

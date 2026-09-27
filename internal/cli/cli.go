@@ -1,5 +1,5 @@
 // Package cli implements the command-line interface for cephilis.
-// It wires together the collector, mount, and format packages, and is the
+// It wires together the collector, mount (health), and format packages, and is the
 // primary entry point called from main.
 package cli
 
@@ -19,7 +19,6 @@ import (
 	"github.com/HudoGriz/cephilis/internal/config"
 	"github.com/HudoGriz/cephilis/internal/format"
 	"github.com/HudoGriz/cephilis/internal/model"
-	"github.com/HudoGriz/cephilis/internal/monitor"
 	"github.com/HudoGriz/cephilis/internal/mount"
 )
 
@@ -37,12 +36,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "space":
 		return runSpace(args[1:], stdout, stderr)
-	case "mount":
-		return runMount(args[1:], stdout, stderr)
 	case "health":
 		return runHealth(args[1:], stdout, stderr)
-	case "all":
-		return runAll(args[1:], stdout, stderr)
 	case "init":
 		return runInit(args[1:], stdout, stderr)
 	case "version", "--version", "-version":
@@ -57,7 +52,7 @@ func Run(args []string, stdout, stderr io.Writer) error {
 }
 
 func printRootHelp(out io.Writer) {
-	fmt.Fprintln(out, "cephilis - HPC storage monitor")
+	fmt.Fprintln(out, "cephilis - CephFS directory usage and client health for Prometheus")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Usage:")
 	fmt.Fprintln(out, "  cephilis <command> [options]")
@@ -65,9 +60,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "Commands:")
 	fmt.Fprintln(out, "  init     Write config templates")
 	fmt.Fprintln(out, "  space    Report directory space usage via CephFS xattrs")
-	fmt.Fprintln(out, "  mount    Check CephFS mount health and export metrics")
 	fmt.Fprintln(out, "  health   Safe CephFS client health for Slurm, Prometheus, or JSON")
-	fmt.Fprintln(out, "  all      Run both space and mount checks")
 	fmt.Fprintln(out, "  version  Print version and exit")
 }
 
@@ -211,133 +204,6 @@ func reportSpaceErrors(results []model.SectionResult, stderr io.Writer) error {
 	return nil
 }
 
-func runMount(args []string, stdout, stderr io.Writer) error {
-	if hasHelpArg(args) {
-		fmt.Fprintln(stdout, "Usage: cephilis mount [--config-dir DIR] [--config FILE] [--mount NAME] [--format table|json|prom]")
-		return nil
-	}
-
-	fs := flag.NewFlagSet("mount", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-
-	configDir := fs.String("config-dir", "", "Config directory")
-	configFile := fs.String("config", "", "Path to mounts.yaml")
-	mountName := fs.String("mount", "", "Only this mount")
-	formatName := fs.String("format", "table", "Output format")
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *formatName != "table" && *formatName != "json" && *formatName != "prom" {
-		return fmt.Errorf("invalid mount --format %q (valid: table|json|prom)", *formatName)
-	}
-
-	mcfg, err := loadMounts(*configFile, *configDir)
-	if err != nil {
-		return err
-	}
-	mounts := mcfg.Mounts
-	if strings.TrimSpace(*mountName) != "" {
-		mounts = filterMount(mounts, *mountName)
-		if len(mounts) == 0 {
-			return fmt.Errorf("mount not found: %s", *mountName)
-		}
-	}
-
-	results := mount.CheckAll(mounts)
-	compat := config.BoolEnv("CEPHILIS_COMPAT_MOUNT_METRICS", false)
-	out, err := renderMounts(*formatName, results, compat)
-	if err != nil {
-		return err
-	}
-	fmt.Fprint(stdout, out)
-	return nil
-}
-
-func runAll(args []string, stdout, stderr io.Writer) error {
-	if hasHelpArg(args) {
-		fmt.Fprintln(stdout, "Usage: cephilis all [--config-dir DIR] [--workers N] [--format table|json|prom]")
-		return nil
-	}
-
-	fs := flag.NewFlagSet("all", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-
-	configDir := fs.String("config-dir", "", "Config directory")
-	workers := fs.Int("workers", 0, "Max parallel workers (0=from config)")
-	formatName := fs.String("format", "table", "Output format")
-
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *formatName != "table" && *formatName != "json" && *formatName != "prom" {
-		return fmt.Errorf("invalid all --format %q (valid: table|json|prom)", *formatName)
-	}
-
-	mcfg, err := loadMounts("", *configDir)
-	if err != nil {
-		return err
-	}
-	scfg, err := loadSections("", *configDir)
-	if err != nil {
-		return err
-	}
-	w := *workers
-	if w <= 0 {
-		w = scfg.Workers
-	}
-
-	health := mount.CheckHealthAll(mcfg.Mounts)
-	space := collector.ScanAll(scfg.Sections, w)
-	if err := reportSpaceErrors(space, stderr); err != nil {
-		return err
-	}
-
-	switch *formatName {
-	case "prom":
-		mo, err := renderHealth("prom", health)
-		if err != nil {
-			return fmt.Errorf("format health: %w", err)
-		}
-		so, err := format.Space("prom", space)
-		if err != nil {
-			return fmt.Errorf("format space: %w", err)
-		}
-		fmt.Fprint(stdout, mo)
-		fmt.Fprint(stdout, so)
-		fmt.Fprint(stdout, monitor.Prom(monitor.Collect()))
-		return nil
-	case "json":
-		so, err := format.Space("json", space)
-		if err != nil {
-			return fmt.Errorf("format space: %w", err)
-		}
-		payload := struct {
-			Health []model.HealthResult `json:"health"`
-			Space  json.RawMessage      `json:"space"`
-		}{Health: health, Space: json.RawMessage(so)}
-		b, err := json.MarshalIndent(payload, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal json: %w", err)
-		}
-		fmt.Fprintln(stdout, string(b))
-		return nil
-	default:
-		mo, err := renderHealth("slurm", health)
-		if err != nil {
-			return fmt.Errorf("format health: %w", err)
-		}
-		so, err := format.Space("table", space)
-		if err != nil {
-			return fmt.Errorf("format space: %w", err)
-		}
-		fmt.Fprint(stdout, mo)
-		fmt.Fprintln(stdout)
-		fmt.Fprint(stdout, so)
-		return nil
-	}
-}
-
 func runInit(args []string, stdout, stderr io.Writer) error {
 	if hasHelpArg(args) {
 		fmt.Fprintln(stdout, "Usage: cephilis init [--config-dir DIR] [--force]")
@@ -386,32 +252,6 @@ func writeTemplate(path, content string, force bool) error {
 		return fmt.Errorf("%s already exists (pass --force to overwrite)", path)
 	}
 	return os.WriteFile(path, []byte(content), 0o644)
-}
-
-// renderMounts renders a slice of MountResult in the requested format,
-// concatenating per-mount output.  For json, wraps in a {"mounts":[...]} object.
-func renderMounts(formatName string, results []model.MountResult, compat bool) (string, error) {
-	if formatName == "json" {
-		b, err := json.MarshalIndent(struct {
-			Mounts []model.MountResult `json:"mounts"`
-		}{Mounts: results}, "", "  ")
-		if err != nil {
-			return "", err
-		}
-		return string(b) + "\n", nil
-	}
-	var b strings.Builder
-	for i, r := range results {
-		out, err := format.Mount(formatName, r, compat)
-		if err != nil {
-			return "", err
-		}
-		b.WriteString(out)
-		if formatName == "table" && i < len(results)-1 {
-			b.WriteString("\n")
-		}
-	}
-	return b.String(), nil
 }
 
 func renderHealth(mode string, results []model.HealthResult) (string, error) {

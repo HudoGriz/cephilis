@@ -12,9 +12,9 @@ RUN CGO_ENABLED=0 go build \
       -o /bin/cephilis ./cmd/cephilis
 
 # Stage 2: minimal runtime
-# NOTE: cephilis shells out to mountpoint, stat, and du from the host — the
-# container is only used for building/distributing the binary.  For actual
-# HPC deployment install the binary directly; see README.md.
+# NOTE: cephilis reads CephFS xattrs and the host's /proc/self/mountinfo and
+# ceph debugfs, so it must see the host's CephFS mount. Install the binary or
+# package on the host; see README.md.
 FROM scratch
 COPY --from=builder /bin/cephilis /cephilis
 ENTRYPOINT ["/cephilis"]

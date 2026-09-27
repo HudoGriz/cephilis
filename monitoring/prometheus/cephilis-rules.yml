@@ -1,78 +1,38 @@
 groups:
-  - name: cephilis-storage
+  - name: cephilis
     rules:
-      - alert: CephilisHomeMountDown
-        expr: cephilis_mount_up{name="home",required="true"} == 0
+      - alert: CephilisClientUnhealthy
+        expr: cephilis_health_ok == 0
         for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "Required /home mount is not mounted on {{ $labels.hostname }}"
-          description: "cephilis reports /home is not mounted on {{ $labels.hostname }}."
+          summary: "CephFS client unhealthy on {{ $labels.hostname }}"
+          description: "{{ $labels.mount }}: mount missing, wrong fstype, or MDS session closed/stale/blocklisted. Run `cephilis health --mode json`."
 
-      - alert: CephilisHomeMountUnresponsive
-        expr: cephilis_mount_responsive{name="home",required="true"} == 0
-        for: 2m
+      - alert: CephilisHealthStale
+        expr: time() - node_textfile_mtime_seconds{file=~"(.*/)?cephilis_health.prom"} > 300
+        for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Required /home mount is unresponsive on {{ $labels.hostname }}"
-          description: "cephilis could not stat the /home probe within the timeout."
+          summary: "cephilis health metrics stale on {{ $labels.instance }}"
+          description: "cephilis-health.service has not written for 5 minutes; the CephFS client is likely hung (processes in D state)."
 
-      - alert: CephilisHomeFSTypeMismatch
-        expr: cephilis_mount_fstype_match{name="home",required="true",expected="ceph"} == 0
-        for: 5m
+      - alert: CephilisSpaceStale
+        expr: time() - node_textfile_mtime_seconds{file=~"(.*/)?cephilis-space.prom"} > 3 * 3600
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "/home is not the expected CephFS filesystem on {{ $labels.hostname }}"
-          description: "Expected filesystem type {{ $labels.expected }}, got {{ $labels.actual }}."
+          summary: "cephilis space scan stale on {{ $labels.instance }}"
+          description: "cephilis-space.prom is older than 3 hours. Check `journalctl -u cephilis-space.service`."
 
-      - alert: CephilisCapsExhausted
-        expr: cephilis_caps_available == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "CephFS client cap pool exhausted"
-          description: "The local CephFS client reports zero available caps."
-
-      - alert: CephilisStaleCapsIncreasing
-        expr: increase(cephilis_kernel_events_total{event="caps_stale"}[10m]) > 0
-        for: 0m
+      - alert: CephilisSectionScanFailed
+        expr: cephilis_section_scan_ok == 0 or cephilis_section_failed_dirs > 0
+        for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "New CephFS stale-cap kernel events"
-          description: "cephilis observed new caps stale messages in the kernel log."
-
-      - alert: CephilisCephHealthNotOK
-        expr: cephilis_ceph_health_ok == 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Ceph health is not HEALTH_OK"
-          description: "cephilis reports Ceph status {{ $labels.status }}."
-
-      - alert: CephilisCollectorFailed
-        expr: cephilis_collector_success == 0
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "cephilis collector {{ $labels.collector }} failed"
-          description: "A cephilis collector has failed for at least five minutes."
-
-      # Raised by slurm_unkillable_step.sh (node_exporter textfile collector) when
-      # slurmd hits an unkillable step (slurmstepd wedged on a hung /home). The node
-      # is drained and will NOT self-recover — reboot it (IPMI) to clear the stuck
-      # COMPLETING jobs. Auto-clears when health_check_wrapper.sh sees /home healthy.
-      - alert: SlurmNodeUnkillableStep
-        expr: slurm_node_unkillable_step == 1
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Slurm node {{ $labels.instance }} has an unkillable step - needs manual reboot"
-          description: "slurmstepd is wedged (slurm_job {{ $labels.slurm_job }}, home_unhealthy={{ $labels.home_unhealthy }}) on {{ $labels.instance }}. The node is drained and will not self-recover; reboot via IPMI to clear the stuck COMPLETING jobs."
+          summary: "cephilis could not fully scan {{ $labels.parent }}"
+          description: "Section {{ $labels.section }} failed or skipped directories. Check `journalctl -u cephilis-space.service`."

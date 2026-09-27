@@ -21,16 +21,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	DefaultWorkers             = 16
-	DefaultMountTimeoutSeconds = 3
-	MetricsPrefix              = "cephilis"
+	DefaultWorkers = 16
+	MetricsPrefix  = "cephilis"
 
 	MountsFilename   = "mounts.yaml"
 	SectionsFilename = "sections.yaml"
@@ -49,18 +47,14 @@ type Section struct {
 	Path string `yaml:"path"`
 }
 
-// Mount is one mountpoint to health-check. Probe is retained for the legacy
-// probe-based mount command; the safe health command does not require it.
-// Required mounts are retained even when their path is missing so health checks
-// can fail loudly.
+// Mount is one mountpoint to health-check. Required mounts are retained even
+// when their path is missing so health checks can fail loudly. Unknown keys
+// from older configs (probe, timeout, legacy) are ignored.
 type Mount struct {
 	Name           string `yaml:"name"`
 	Path           string `yaml:"path"`
-	Probe          string `yaml:"probe"`
-	Timeout        int    `yaml:"timeout,omitempty"`
 	Required       bool   `yaml:"required,omitempty"`
 	ExpectedFSType string `yaml:"expected_fstype,omitempty"`
-	Legacy         bool   `yaml:"legacy,omitempty"`
 }
 
 // SectionsConfig is the parsed sections.yaml.
@@ -127,13 +121,7 @@ func LoadMounts(path string) (MountsConfig, error) {
 			return MountsConfig{}, fmt.Errorf("mount %q is missing 'path'", m.Name)
 		}
 		m.Path = filepath.Clean(m.Path)
-		if m.Probe != "" {
-			m.Probe = filepath.Clean(m.Probe)
-		}
 		m.ExpectedFSType = strings.TrimSpace(m.ExpectedFSType)
-		if m.Timeout <= 0 {
-			m.Timeout = DefaultMountTimeoutSeconds
-		}
 	}
 
 	return cfg, nil
@@ -199,35 +187,4 @@ func resolveFile(path, defaultName string) (string, error) {
 		return filepath.Join(path, defaultName), nil
 	}
 	return path, nil
-}
-
-// IntEnv reads an integer from the named env var.  Returns fallback when
-// absent, empty, non-numeric, or <= 0.
-func IntEnv(name string, fallback int) int {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil || v <= 0 {
-		return fallback
-	}
-	return v
-}
-
-// BoolEnv reads a boolean from the named env var.  Truthy: 1,true,yes,on.
-// Falsy: 0,false,no,off.  Anything else returns fallback.
-func BoolEnv(name string, fallback bool) bool {
-	raw := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
-	if raw == "" {
-		return fallback
-	}
-	switch raw {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return fallback
-	}
 }

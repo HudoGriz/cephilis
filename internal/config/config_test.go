@@ -133,8 +133,22 @@ func TestLoadMountsHappyPath(t *testing.T) {
 	if m.Name != "home" || m.Path != mountPath {
 		t.Errorf("unexpected mount: %+v", m)
 	}
-	if m.Timeout != DefaultMountTimeoutSeconds {
-		t.Errorf("expected default timeout %d, got %d", DefaultMountTimeoutSeconds, m.Timeout)
+}
+
+// Deployed mounts.yaml files still carry keys from the removed `mount`
+// command. They must keep loading: Slurm HealthCheckProgram and Prolog drain
+// the node if `cephilis health` fails.
+func TestLoadMountsIgnoresLegacyKeys(t *testing.T) {
+	dir := t.TempDir()
+	cfgFile := filepath.Join(dir, MountsFilename)
+	writeFile(t, cfgFile, "mounts:\n  - name: home\n    path: /home\n    probe: /home/.probe\n    timeout: 3\n    required: true\n    expected_fstype: ceph\n    legacy: true\n")
+
+	cfg, err := LoadMounts(cfgFile)
+	if err != nil {
+		t.Fatalf("LoadMounts with legacy keys: %v", err)
+	}
+	if len(cfg.Mounts) != 1 || !cfg.Mounts[0].Required || cfg.Mounts[0].ExpectedFSType != "ceph" {
+		t.Fatalf("unexpected mount config: %+v", cfg.Mounts[0])
 	}
 }
 
@@ -152,19 +166,6 @@ func TestLoadMountsMissingIsRetainedWithoutStat(t *testing.T) {
 	}
 	if cfg.Mounts[0].Path != "/nonexistent/required" || cfg.Mounts[0].ExpectedFSType != "ceph" {
 		t.Fatalf("unexpected mount config: %+v", cfg.Mounts[0])
-	}
-}
-
-func TestLoadMountsMissingField(t *testing.T) {
-	dir := t.TempDir()
-	cfgFile := filepath.Join(dir, MountsFilename)
-	writeFile(t, cfgFile, "mounts:\n  - name: home\n    path: /tmp\n")
-	cfg, err := LoadMounts(cfgFile)
-	if err != nil {
-		t.Fatalf("LoadMounts should allow missing probe: %v", err)
-	}
-	if cfg.Mounts[0].Probe != "" {
-		t.Fatalf("expected empty probe, got %q", cfg.Mounts[0].Probe)
 	}
 }
 
@@ -199,38 +200,5 @@ func TestResolveConfigDirExplicit(t *testing.T) {
 func TestResolveConfigDirMissing(t *testing.T) {
 	if _, err := ResolveConfigDir("/nonexistent/xyz"); err == nil {
 		t.Fatal("expected error for missing dir")
-	}
-}
-
-func TestIntEnv(t *testing.T) {
-	t.Setenv("TEST_INT", "42")
-	if v := IntEnv("TEST_INT", 1); v != 42 {
-		t.Errorf("expected 42, got %d", v)
-	}
-	if v := IntEnv("TEST_INT_MISSING", 7); v != 7 {
-		t.Errorf("expected fallback 7, got %d", v)
-	}
-	t.Setenv("TEST_INT_BAD", "notanumber")
-	if v := IntEnv("TEST_INT_BAD", 3); v != 3 {
-		t.Errorf("expected fallback 3, got %d", v)
-	}
-}
-
-func TestBoolEnv(t *testing.T) {
-	cases := []struct {
-		val  string
-		want bool
-	}{
-		{"1", true}, {"true", true}, {"yes", true}, {"on", true},
-		{"0", false}, {"false", false}, {"no", false}, {"off", false},
-	}
-	for _, c := range cases {
-		t.Setenv("TEST_BOOL", c.val)
-		if got := BoolEnv("TEST_BOOL", !c.want); got != c.want {
-			t.Errorf("BoolEnv(%q) = %v, want %v", c.val, got, c.want)
-		}
-	}
-	if v := BoolEnv("TEST_BOOL_MISSING", true); !v {
-		t.Error("expected fallback true")
 	}
 }

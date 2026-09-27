@@ -1,53 +1,76 @@
-# Cephilis
+# cephilis
 
 [![CI](https://github.com/HudoGriz/cephilis/actions/workflows/ci.yml/badge.svg)](https://github.com/HudoGriz/cephilis/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A minimal, dependency-free CephFS space and health exporter for HPC nodes.
-Produces Prometheus textfile metrics consumed by `node_exporter`.
+**Per-directory CephFS usage for Prometheus and Grafana — without walking the tree.**
 
-## Goals
+CephFS already tracks the recursive size and file count of every directory
+(`ceph.dir.rbytes`, `ceph.dir.rfiles`). cephilis reads those extended
+attributes for the folders you care about and exports them as Prometheus
+metrics, so you get per-project and per-user usage, growth trends and a
+drill-down folder tree in Grafana.
 
-- Single static binary
-- Safe CephFS client health checks for Slurm: no `/home` stat/list/probe
-- O(1) CephFS xattr queries — no filesystem traversal for space reporting
-- Prometheus textfile output for `node_exporter`
+- **Fast and safe:** one `getxattr` per directory. A scan of ~170 folders over
+  660 TiB / 34 M files takes ~50 ms. `du`, `ncdu` or Robinhood would walk every
+  file for hours.
+- **Folder tree dashboard:** click a folder to see its children, their size,
+  file count, trend and 7-day growth.
+- **D-safe client health (optional):** `cephilis health` reports whether the
+  local CephFS kernel client is mounted and has a healthy MDS session, reading
+  only `/proc/self/mountinfo` and the ceph debugfs — it never touches the
+  mount, so it keeps answering while CephFS is hung. Suitable for Slurm
+  `HealthCheckProgram` / `Prolog`.
+- Single static binary, no dependencies; RPM/DEB packages and systemd units.
 
 ## Install
 
-Download a pre-built binary from [Releases](https://github.com/HudoGriz/cephilis/releases), or build from source:
+Download a package or tarball from
+[Releases](https://github.com/HudoGriz/cephilis/releases) (`linux/amd64`,
+`linux/arm64`), or build from source:
 
 ```bash
-git clone https://github.com/HudoGriz/cephilis.git
-cd cephilis
-make build
-sudo make install
+git clone https://github.com/HudoGriz/cephilis.git && cd cephilis
+make build && sudo make install
 ```
+
+cephilis writes node_exporter
+[textfile collector](https://github.com/prometheus/node_exporter#textfile-collector)
+files to `/var/lib/node_exporter/textfile_collector`; point node_exporter at
+that directory (`--collector.textfile.directory`).
 
 ## Usage
 
 ```bash
-cephilis version
-cephilis space --format table --config ./config/sections.yaml
-cephilis health --mount /home --mode slurm
-cephilis health --mount /home --mode prom
-cephilis health --mount /home --mode json
-cephilis all   --format prom --config-dir ./config
+cephilis space --format table            # human-readable report
+cephilis space --format prom             # Prometheus text format (also csv, tsv, json)
+cephilis health --mode prom              # client health metrics
+cephilis health --mount /home --mode slurm   # exit 1 if the client is unhealthy
+cephilis init                            # write config templates
 ```
 
-Run any sub-command with `--help` for full flag documentation.
+Run any sub-command with `--help` for all flags.
 
-## Config
+## Configuration
 
-Default config directory search order:
+Config files are read from `/etc/cephilis` (or `./config`, or `--config-dir`).
 
-1. `/etc/cephilis`
-2. `config`
+`sections.yaml` — folders to report. Each section exports its own recursive
+totals plus one series per immediate subdirectory. Nest sections to get
+deeper levels in the dashboard tree:
 
-`mounts.yaml` declares safe health checks. Required mounts are retained even
-when the path is missing, so Slurm wrappers can fail closed. Health checks read
-the local mount table and Ceph kernel debugfs state; they do not stat/list/read
-or write the mount path:
+```yaml
+workers: 16
+sections:
+  - name: Home
+    path: /cephfs/home
+  - name: Projects
+    path: /cephfs/projects
+  - name: Project archive
+    path: /cephfs/projects/archive
+```
+
+`mounts.yaml` — mounts checked by `cephilis health`:
 
 ```yaml
 mounts:
@@ -57,72 +80,60 @@ mounts:
     expected_fstype: ceph
 ```
 
-`sections.yaml` declares CephFS xattr space scans:
-
-```yaml
-workers: 16
-sections:
-  - name: Home Users
-    path: /home
-```
-
-`cephilis health --mode slurm` exits nonzero when the selected mount is
-unhealthy. Slurm prolog and HealthCheckProgram wrappers should call it and keep
-Slurm actions such as drain/resume in shell.
-
-`--mode prom` prints Prometheus metrics and exits successfully when the
-collector ran, even if the health metric is `0`. `--mode json` is intended for
-debugging and tests.
-
-For safe non-invasive tests, the health checker can be pointed at fake local
-state:
+## Deploy with systemd
 
 ```bash
-CEPHILIS_MOUNTINFO_PATH=/tmp/fake-mountinfo \
-CEPHILIS_CEPH_DEBUGFS_GLOB='/tmp/fake-ceph-debug/*/mds_sessions' \
-cephilis health --mount /home --mode slurm
-```
-
-## Systemd deployment
-
-Install binary:
-
-```bash
-sudo install -D -m 0755 bin/cephilis /usr/local/bin/cephilis
-```
-
-Install units:
-
-```bash
-sudo install -D -m 0644 systemd/cephilis-metrics.service /etc/systemd/system/cephilis-metrics.service
-sudo install -D -m 0644 systemd/cephilis-metrics.timer   /etc/systemd/system/cephilis-metrics.timer
+sudo install -m 0644 systemd/cephilis-*.{service,timer} /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now cephilis-metrics.timer
+sudo systemctl enable --now cephilis-space.timer    # hourly, on ONE node
+sudo systemctl enable --now cephilis-health.timer   # every minute, on every client
 ```
 
-Optional env file: `/etc/cephilis/metrics.env`
+Run the space scan on a single node that mounts the filesystem: the numbers are
+cluster-wide, and if CephFS hangs the scan can block in D state — the oneshot
+unit is then simply not relaunched and `CephilisSpaceStale` fires.
 
-| Variable                      | Default                                        | Description                                   |
-|-------------------------------|------------------------------------------------|-----------------------------------------------|
-| `CEPHILIS_BIN`                | `/usr/local/bin/cephilis`                      | Path to the binary                            |
-| `CEPHILIS_ARGS`               | `all --format prom`                            | Arguments passed to the binary                |
-| `CEPHILIS_OUTPUT_DIR`         | `/var/lib/node_exporter/textfile_collector`    | Directory for `.prom` output                  |
-| `CEPHILIS_OUTPUT_FILE`        | `cephilis.prom`                                | Output filename                               |
-| `CEPHILIS_COMPAT_MOUNT_METRICS` | (unset)                                      | Set to `1` for legacy `mount_home_*` metrics  |
+## Metrics
+
+| Metric | Labels | Source |
+|---|---|---|
+| `cephilis_dir_size_bytes` | `section`, `parent`, `name` | `ceph.dir.rbytes` of each subdirectory |
+| `cephilis_dir_files_total` | `section`, `parent`, `name` | `ceph.dir.rfiles` of each subdirectory |
+| `cephilis_section_size_bytes` | `section`, `parent` | `ceph.dir.rbytes` of the section root |
+| `cephilis_section_files_total` | `section`, `parent` | `ceph.dir.rfiles` of the section root |
+| `cephilis_section_scan_ok` | `section`, `parent` | 1 if the section root was read |
+| `cephilis_section_failed_dirs` | `section`, `parent` | subdirectories skipped (unreadable xattrs) |
+| `cephilis_health_ok` | `name`, `mount`, `hostname`, `expected`, `actual` | overall client health |
+| `cephilis_mount_up`, `cephilis_mount_fstype_match` | same | mount table |
+| `cephilis_cephfs_mds_session_open`, `cephilis_cephfs_session_unhealthy` | same | ceph debugfs `mds_sessions` |
+
+## Grafana and alerts
+
+- Dashboard: [`monitoring/grafana/dashboards/cephilis.json`](monitoring/grafana/dashboards/cephilis.json)
+  — import it and pick your Prometheus datasource. Folder tree, per-folder
+  drill-down, growth, and client health.
+- Alert rules: [`monitoring/prometheus/cephilis-rules.yml`](monitoring/prometheus/cephilis-rules.yml)
+  — unhealthy client, stale health metrics (hung client), stale or failed
+  space scan.
+
+## How it compares
+
+| Tool | Per-folder usage | History / Grafana | Cost on a large CephFS |
+|---|---|---|---|
+| cephilis | yes | yes | one xattr per folder |
+| Ceph Dashboard directory browser | quotas / snapshots | no | — |
+| `du`, `ncdu`, `gdu`, `duc` | yes | no | walks every file |
+| Robinhood | yes (+ owner, age, type) | own DB/UI | full scans + database |
+| mgr `prometheus` module, `ceph_exporter` | no (cluster/pool level) | yes | — |
 
 ## Development
 
 ```bash
-make test      # run tests with race detector
-make cover     # generate HTML coverage report
-make lint      # run golangci-lint (requires golangci-lint installed)
-make vet       # go vet
-make fmt       # gofmt
+make test   # tests with race detector
+make lint   # golangci-lint
 ```
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
 
 ## License
 
