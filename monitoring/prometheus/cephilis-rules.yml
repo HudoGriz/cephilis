@@ -10,6 +10,8 @@ groups:
           summary: "CephFS client unhealthy on {{ $labels.hostname }}"
           description: "{{ $labels.mount }}: mount missing, wrong fstype, or MDS session closed/stale/blocklisted. Run `cephilis health --mode json`."
 
+      # Textfile mode only: the health timer stopped writing, which usually
+      # means processes on this client are stuck in D state.
       - alert: CephilisHealthStale
         expr: time() - node_textfile_mtime_seconds{file=~"(.*/)?cephilis_health.prom"} > 300
         for: 5m
@@ -17,22 +19,40 @@ groups:
           severity: critical
         annotations:
           summary: "cephilis health metrics stale on {{ $labels.instance }}"
-          description: "cephilis-health.service has not written for 5 minutes; the CephFS client is likely hung (processes in D state)."
+          description: "cephilis-health.service has not written for 5 minutes; the CephFS client is likely hung."
 
-      - alert: CephilisSpaceStale
-        expr: time() - node_textfile_mtime_seconds{file=~"(.*/)?cephilis-space.prom"} > 3 * 3600
-        for: 30m
-        labels:
-          severity: warning
-        annotations:
-          summary: "cephilis space scan stale on {{ $labels.instance }}"
-          description: "cephilis-space.prom is older than 3 hours. Check `journalctl -u cephilis-space.service`."
-
-      - alert: CephilisSectionScanFailed
-        expr: cephilis_section_scan_ok == 0 or cephilis_section_failed_dirs > 0
+      - alert: CephilisScanStale
+        expr: time() - max by (instance) (cephilis_scan_timestamp_seconds) > 3 * 3600
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "cephilis could not fully scan {{ $labels.parent }}"
-          description: "Section {{ $labels.section }} failed or skipped directories. Check `journalctl -u cephilis-space.service`."
+          summary: "No cephilis space scan for 3 hours on {{ $labels.instance }}"
+          description: "Check cephilis-space.service (textfile mode) or cephilis serve."
+
+      # Serve mode: a scan that never finishes is blocked on CephFS.
+      - alert: CephilisScanStuck
+        expr: cephilis_serve_scan_running_seconds > 1800
+        labels:
+          severity: warning
+        annotations:
+          summary: "cephilis space scan running for {{ $value | humanizeDuration }} on {{ $labels.instance }}"
+          description: "The scan child process is likely blocked on CephFS (D state)."
+
+      - alert: CephilisPathScanFailed
+        expr: cephilis_root_scan_ok == 0 or cephilis_root_failed_dirs > 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "cephilis could not fully scan {{ $labels.root }}"
+          description: "The path or some of its subdirectories could not be read."
+
+      - alert: CephilisQuotaNearlyFull
+        expr: cephilis_dir_bytes / on(path) group_left() max by (path) (cephilis_dir_quota_bytes) > 0.9
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.path }} is at {{ $value | humanizePercentage }} of its CephFS quota"
+          description: "Writes will fail with EDQUOT when the quota is reached."

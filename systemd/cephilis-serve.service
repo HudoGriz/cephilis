@@ -1,0 +1,17 @@
+[Unit]
+Description=cephilis exporter: CephFS directory usage and client health on /metrics
+Documentation=https://github.com/HudoGriz/cephilis
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Alternative to the cephilis-space/cephilis-health timers when node_exporter's
+# textfile collector is not used. Scans run in a child process; a scan blocked
+# on CephFS is reported (cephilis_serve_scan_running_seconds), not piled up.
+ExecStart=cephilis serve --listen :9966 --interval 15m
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

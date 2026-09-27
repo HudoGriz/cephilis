@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-27
+
+### Added
+- `paths:` config: report a directory plus `depth` levels of subdirectories;
+  overlapping paths are reported once. `max_dirs` caps the directories per path
+  (keeping the largest), `max_entries` refuses to list huge directories, and a
+  directory is only listed when `ceph.dir.subdirs` says it has subdirectories.
+- `cephilis_dir_rctime_seconds` (latest change below a directory) for finding
+  cold data.
+- CephFS quotas: `cephilis_dir_quota_bytes` / `cephilis_dir_quota_files`, read
+  from the combined `ceph.quota` xattr; `skip_quotas` to save the read.
+- `owner: true` per path adds the owner's user name (resolved through
+  `getent`, so LDAP/SSSD users work in the static binary).
+- `cephilis serve`: HTTP exporter on `:9966` with periodic scans in a child
+  process; a scan blocked on CephFS is reported, never piled up.
+  `cephilis-serve.service` unit.
+- `cephilis_scan_xattr_reads` (= MDS requests), `cephilis_scan_duration_seconds`,
+  `cephilis_scan_timestamp_seconds`, `cephilis_root_{scan_ok,dirs,truncated,failed_dirs}`.
+- Dashboard: folder tree of every directory with reported subdirectories,
+  idle-time, quota, by-owner and scan-cost panels.
+- Alert rules for stale/stuck scans, failed paths, and quotas above 90 %.
+- Container image `ghcr.io/hudogriz/cephilis`, Ansible and Kubernetes examples.
+
+### Changed
+- **Metric names** (breaking, pre-1.0): `cephilis_dir_size_bytes` →
+  `cephilis_dir_bytes`, `cephilis_dir_files_total` → `cephilis_dir_files`,
+  labels `section`/`parent`/`name` → `path`/`parent`; `cephilis_section_*` →
+  `cephilis_root_*`. `sections:` configs still load as depth-1 paths.
+- Fewer MDS round trips: measured one `getattr` per `ceph.*` xattr read, so
+  leaves no longer read `subdirs`/`entries` and quotas use one combined read
+  (7 → 4 reads per directory, 3 with `skip_quotas`).
+- The space timer runs every 15 minutes (was hourly).
+- Table output shows each directory's subdirectories with share, files, last
+  change and quota usage.
+
 ## [0.2.0] - 2026-09-27
 
 Focus: cephilis is now a CephFS per-directory usage exporter with an optional

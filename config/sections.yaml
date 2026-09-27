@@ -1,12 +1,14 @@
 # cephilis sections.yaml
-# Each section reports its own recursive size and one metric per immediate
-# subdirectory, read from CephFS xattrs (ceph.dir.rbytes / rfiles) — no tree
-# walk. Nested sections give the Grafana folder tree its drill-down levels.
+# Directory trees to report, read from CephFS xattrs (ceph.dir.rbytes/rfiles/
+# rctime, ceph.quota) — never a tree walk. Each path reports itself plus
+# `depth` levels of subdirectories; see README.md.
 workers: 16
-sections:
-  - name: Home
-    path: /cephfs/home
-  - name: Projects
-    path: /cephfs/projects
-  - name: Project archive
-    path: /cephfs/projects/archive
+max_dirs: 1000       # per path; keeps the largest directories
+max_entries: 10000   # never list a directory with more immediate entries
+skip_quotas: false
+paths:
+  - path: /cephfs/home
+    depth: 1
+    owner: true
+  - path: /cephfs/projects
+    depth: 2

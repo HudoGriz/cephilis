@@ -5,127 +5,107 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/HudoGriz/cephilis/internal/model"
 )
 
-var testResults = []model.SectionResult{
-	{
-		Name:       "Home Users",
-		ParentPath: "/home",
-		Parent:     &model.DirStats{RBytes: 1000, RFiles: 10},
-		Entries: []model.DirStats{
-			{Name: "user1", Path: "/home/user1", RBytes: 600, RFiles: 5},
-			{Name: "user2", Path: "/home/user2", RBytes: 400, RFiles: 3},
-		},
+var testScan = model.Scan{
+	Started:  time.Unix(1790000000, 0),
+	Duration: 50 * time.Millisecond,
+	Dirs: []model.Dir{
+		{Path: "/cephfs/home", Parent: "/cephfs", Bytes: 1000, Files: 10, RCTime: 1790503574.69},
+		{Path: "/cephfs/home/alice", Parent: "/cephfs/home", Owner: "alice", Bytes: 600, Files: 5, QuotaBytes: 1200},
+		{Path: "/cephfs/home/bob", Parent: "/cephfs/home", Owner: "bob", Bytes: 400, Files: 3},
+	},
+	Roots: []model.RootResult{
+		{Path: "/cephfs/home", Dirs: 3},
+		{Path: "/cephfs/gone", Err: errors.New("enoent")},
 	},
 }
 
-func TestSpacePromContainsMetrics(t *testing.T) {
-	out, err := Space("prom", testResults)
+func TestSpacePromMetrics(t *testing.T) {
+	out, err := Space("prom", testScan)
 	if err != nil {
-		t.Fatalf("Space(prom) error: %v", err)
-	}
-	for _, want := range []string{"cephilis_dir_size_bytes", "cephilis_dir_files_total", "user1", "user2"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("prom output missing %q", want)
-		}
-	}
-}
-
-func TestSpacePromSectionMetrics(t *testing.T) {
-	results := append([]model.SectionResult{}, testResults...)
-	results = append(results, model.SectionResult{Name: "Gone", ParentPath: "/home/gone", Err: errors.New("enoent")})
-	out, err := Space("prom", results)
-	if err != nil {
-		t.Fatalf("Space(prom) error: %v", err)
+		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`cephilis_section_scan_ok{section="gone",parent="/home/gone"} 0`,
-		`cephilis_section_scan_ok{section="home_users",parent="/home"} 1`,
-		`cephilis_section_size_bytes{section="home_users",parent="/home"}`,
-		`cephilis_section_files_total{section="home_users",parent="/home"}`,
-		`cephilis_section_failed_dirs{section="home_users",parent="/home"} 0`,
+		`cephilis_dir_bytes{path="/cephfs/home",parent="/cephfs"} 1000`,
+		`cephilis_dir_files{path="/cephfs/home/alice",parent="/cephfs/home",owner="alice"} 5`,
+		`cephilis_dir_rctime_seconds{path="/cephfs/home",parent="/cephfs"} 1790503574.690`,
+		`cephilis_dir_quota_bytes{path="/cephfs/home/alice",parent="/cephfs/home",owner="alice"} 1200`,
+		`cephilis_root_scan_ok{root="/cephfs/home"} 1`,
+		`cephilis_root_scan_ok{root="/cephfs/gone"} 0`,
+		`cephilis_root_dirs{root="/cephfs/home"} 3`,
+		`cephilis_scan_duration_seconds 0.050`,
+		`cephilis_scan_timestamp_seconds 1790000000`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("prom output missing %q", want)
 		}
 	}
-	if strings.Contains(out, `cephilis_section_size_bytes{section="gone"`) {
-		t.Error("failed section must not report a size")
+	// Quota and rctime series only exist where the attribute is set.
+	if strings.Contains(out, `cephilis_dir_quota_bytes{path="/cephfs/home/bob"`) {
+		t.Error("quota series for a directory without quota")
+	}
+	if strings.Contains(out, `cephilis_dir_rctime_seconds{path="/cephfs/home/bob"`) {
+		t.Error("rctime series for a directory without rctime")
+	}
+}
+
+func TestSpacePromLabelEscaping(t *testing.T) {
+	s := model.Scan{Dirs: []model.Dir{{Path: `/x/we"ird\dir`, Parent: "/x"}}}
+	out, _ := Space("prom", s)
+	if !strings.Contains(out, `path="/x/we\"ird\\dir"`) {
+		t.Errorf("label not escaped:\n%s", out)
 	}
 }
 
 func TestSpaceTable(t *testing.T) {
-	out, err := Space("table", testResults)
+	out, err := Space("table", testScan)
 	if err != nil {
-		t.Fatalf("Space(table) error: %v", err)
+		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Home Users") {
-		t.Error("table missing section name")
-	}
-	if !strings.Contains(out, "user1") {
-		t.Error("table missing entry name")
+	for _, want := range []string{"/cephfs/home", "/alice", "quota 50.0%", "! /cephfs/gone"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
 	}
 }
 
-func TestSpaceCSV(t *testing.T) {
-	out, err := Space("csv", testResults)
-	if err != nil {
-		t.Fatalf("Space(csv) error: %v", err)
-	}
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	// header + 2 entries
-	if len(lines) != 3 {
-		t.Fatalf("expected 3 CSV lines, got %d:\n%s", len(lines), out)
-	}
-	if !strings.HasPrefix(lines[0], "section,") {
-		t.Errorf("unexpected CSV header: %q", lines[0])
-	}
-}
-
-func TestSpaceTSV(t *testing.T) {
-	out, err := Space("tsv", testResults)
-	if err != nil {
-		t.Fatalf("Space(tsv) error: %v", err)
-	}
-	if !strings.Contains(out, "\t") {
-		t.Error("TSV output has no tabs")
+func TestSpaceCSVAndTSV(t *testing.T) {
+	for name, sep := range map[string]string{"csv": ",", "tsv": "\t"} {
+		out, err := Space(name, testScan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		if len(lines) != 4 || !strings.HasPrefix(lines[0], "path"+sep+"parent") {
+			t.Errorf("%s: unexpected output:\n%s", name, out)
+		}
 	}
 }
 
 func TestSpaceJSON(t *testing.T) {
-	out, err := Space("json", testResults)
+	out, err := Space("json", testScan)
 	if err != nil {
-		t.Fatalf("Space(json) error: %v", err)
+		t.Fatal(err)
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	var v struct {
+		Dirs  []map[string]any `json:"dirs"`
+		Roots []map[string]any `json:"roots"`
 	}
-	if _, ok := parsed["sections"]; !ok {
-		t.Error("JSON missing 'sections' key")
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := parsed["timestamp"]; !ok {
-		t.Error("JSON missing 'timestamp' key")
+	if len(v.Dirs) != 3 || len(v.Roots) != 2 || v.Roots[1]["error"] != "enoent" {
+		t.Errorf("unexpected json: %s", out)
 	}
 }
 
 func TestSpaceUnknownFormat(t *testing.T) {
-	_, err := Space("xml", testResults)
-	if err == nil {
-		t.Fatal("expected error for unknown format")
-	}
-}
-
-func TestIsValid(t *testing.T) {
-	for _, f := range []string{"table", "csv", "tsv", "json", "prom"} {
-		if !IsValid(f) {
-			t.Errorf("IsValid(%q) = false, want true", f)
-		}
-	}
-	if IsValid("xml") {
-		t.Error("IsValid('xml') = true, want false")
+	if _, err := Space("xml", testScan); err == nil {
+		t.Error("expected error for unknown format")
 	}
 }
 

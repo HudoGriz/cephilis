@@ -1,0 +1,58 @@
+# Example: run `cephilis serve` in Kubernetes (e.g. with Rook).
+# Mount the CephFS tree read-only from an existing PVC/PV (static CephFS
+# volume of the filesystem root, or the subtree you want to report).
+# One replica is enough: CephFS statistics are cluster-wide.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cephilis
+data:
+  sections.yaml: |
+    workers: 16
+    max_dirs: 1000
+    paths:
+      - { path: /cephfs/volumes, depth: 3 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cephilis
+  labels: {app: cephilis}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: cephilis}
+  template:
+    metadata:
+      labels: {app: cephilis}
+    spec:
+      containers:
+        - name: cephilis
+          image: ghcr.io/hudogriz/cephilis:0.3.0
+          args: ["serve", "--health=false", "--interval=15m"]
+          ports:
+            - {name: metrics, containerPort: 9966}
+          volumeMounts:
+            - {name: config, mountPath: /etc/cephilis, readOnly: true}
+            - {name: cephfs, mountPath: /cephfs, readOnly: true}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 128Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: config
+          configMap: {name: cephilis}
+        - name: cephfs
+          persistentVolumeClaim: {claimName: cephfs-root, readOnly: true}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cephilis
+  labels: {app: cephilis}
+spec:
+  selector: {app: cephilis}
+  ports:
+    - {name: metrics, port: 9966, targetPort: metrics}

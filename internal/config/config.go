@@ -5,8 +5,8 @@
 // directory:
 //
 //   - mounts.yaml    — list of mounts to health-check (path, expected_fstype)
-//   - sections.yaml  — list of directories to measure for size, plus
-//     per-file options like the worker pool size
+//   - sections.yaml  — directory trees to report usage for (paths, depth,
+//     limits); the older `sections:` list is still accepted
 //
 // The configuration directory is resolved in this order:
 //
@@ -27,8 +27,11 @@ import (
 )
 
 const (
-	DefaultWorkers = 16
-	MetricsPrefix  = "cephilis"
+	DefaultWorkers    = 16
+	DefaultDepth      = 1
+	DefaultMaxDirs    = 1000
+	DefaultMaxEntries = 10000
+	MetricsPrefix     = "cephilis"
 
 	MountsFilename   = "mounts.yaml"
 	SectionsFilename = "sections.yaml"
@@ -41,8 +44,17 @@ var DefaultConfigDirs = []string{
 	"config",
 }
 
-// Section is one directory tree to measure for size.
-type Section struct {
+// Path is one directory tree to report: the root itself plus every
+// subdirectory down to Depth levels below it.
+type Path struct {
+	Path  string `yaml:"path"`
+	Depth int    `yaml:"depth,omitempty"`
+	// Owner adds an owner label (user name of the directory's uid).
+	Owner bool `yaml:"owner,omitempty"`
+}
+
+// legacySection is the pre-0.3 `sections:` entry; it maps to a Path of depth 1.
+type legacySection struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
 }
@@ -57,10 +69,21 @@ type Mount struct {
 	ExpectedFSType string `yaml:"expected_fstype,omitempty"`
 }
 
-// SectionsConfig is the parsed sections.yaml.
-type SectionsConfig struct {
-	Workers  int       `yaml:"workers,omitempty"`
-	Sections []Section `yaml:"sections"`
+// SpaceConfig is the parsed sections.yaml.
+type SpaceConfig struct {
+	Workers int `yaml:"workers,omitempty"`
+	// MaxDirs caps the directories reported per path, so a wide tree cannot
+	// flood Prometheus with series.
+	MaxDirs int `yaml:"max_dirs,omitempty"`
+	// MaxEntries: directories with more immediate entries than this are not
+	// listed (listing reads every entry from the MDS); they are still reported.
+	MaxEntries int `yaml:"max_entries,omitempty"`
+	// SkipQuotas saves one MDS round trip per directory on filesystems
+	// without quotas.
+	SkipQuotas bool   `yaml:"skip_quotas,omitempty"`
+	Paths      []Path `yaml:"paths"`
+
+	Sections []legacySection `yaml:"sections"`
 }
 
 // MountsConfig is the parsed mounts.yaml.
@@ -127,44 +150,58 @@ func LoadMounts(path string) (MountsConfig, error) {
 	return cfg, nil
 }
 
-// LoadSections reads sections.yaml from path (file or enclosing directory).
-// Sections whose Path does not exist are skipped with a warning to stderr.
-func LoadSections(path string) (SectionsConfig, error) {
+// LoadSpace reads sections.yaml from path (file or enclosing directory).
+// Legacy `sections:` entries become depth-1 paths. Paths that do not exist are
+// skipped with a warning to stderr.
+func LoadSpace(path string) (SpaceConfig, error) {
 	file, err := resolveFile(path, SectionsFilename)
 	if err != nil {
-		return SectionsConfig{}, err
+		return SpaceConfig{}, err
 	}
 	b, err := os.ReadFile(file)
 	if err != nil {
-		return SectionsConfig{}, fmt.Errorf("read sections %s: %w", file, err)
+		return SpaceConfig{}, fmt.Errorf("read %s: %w", file, err)
 	}
-	var cfg SectionsConfig
+	var cfg SpaceConfig
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return SectionsConfig{}, fmt.Errorf("parse sections %s: %w", file, err)
+		return SpaceConfig{}, fmt.Errorf("parse %s: %w", file, err)
 	}
-	if len(cfg.Sections) == 0 {
-		return SectionsConfig{}, errors.New("sections.yaml has no sections")
+	for _, s := range cfg.Sections {
+		cfg.Paths = append(cfg.Paths, Path{Path: s.Path, Depth: 1})
+	}
+	cfg.Sections = nil
+	if len(cfg.Paths) == 0 {
+		return SpaceConfig{}, fmt.Errorf("%s has no paths", file)
 	}
 	if cfg.Workers <= 0 {
 		cfg.Workers = DefaultWorkers
 	}
-
-	for i := range cfg.Sections {
-		cfg.Sections[i].Path = filepath.Clean(cfg.Sections[i].Path)
+	if cfg.MaxDirs <= 0 {
+		cfg.MaxDirs = DefaultMaxDirs
+	}
+	if cfg.MaxEntries <= 0 {
+		cfg.MaxEntries = DefaultMaxEntries
 	}
 
-	filtered := make([]Section, 0, len(cfg.Sections))
-	for _, s := range cfg.Sections {
-		if _, statErr := os.Stat(s.Path); statErr == nil {
-			filtered = append(filtered, s)
-		} else {
-			fmt.Fprintf(os.Stderr, "warning: skipping section %q: path %s does not exist\n", s.Name, s.Path)
+	filtered := make([]Path, 0, len(cfg.Paths))
+	for _, p := range cfg.Paths {
+		if p.Path == "" {
+			return SpaceConfig{}, fmt.Errorf("%s: path entry without 'path'", file)
 		}
+		p.Path = filepath.Clean(p.Path)
+		if p.Depth <= 0 {
+			p.Depth = DefaultDepth
+		}
+		if _, statErr := os.Stat(p.Path); statErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping path %s: %v\n", p.Path, statErr)
+			continue
+		}
+		filtered = append(filtered, p)
 	}
 	if len(filtered) == 0 {
-		return SectionsConfig{}, errors.New("no configured section paths exist on this host")
+		return SpaceConfig{}, errors.New("no configured paths exist on this host")
 	}
-	cfg.Sections = filtered
+	cfg.Paths = filtered
 	return cfg, nil
 }
 

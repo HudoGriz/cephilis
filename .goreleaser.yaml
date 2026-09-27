@@ -56,6 +56,17 @@ nfpms:
       - src: monitoring/prometheus/cephilis-rules.yml
         dst: /usr/share/cephilis/prometheus/cephilis-rules.yml
 
+dockers:
+  - image_templates:
+      - "ghcr.io/hudogriz/cephilis:{{ .Version }}"
+      - "ghcr.io/hudogriz/cephilis:latest"
+    dockerfile: Dockerfile.release
+    goarch: amd64
+    build_flag_templates:
+      - "--label=org.opencontainers.image.source=https://github.com/HudoGriz/cephilis"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.licenses=MIT"
+
 checksum:
   name_template: "checksums.txt"
 

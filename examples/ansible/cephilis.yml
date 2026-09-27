@@ -1,0 +1,78 @@
+---
+# Example: deploy cephilis in textfile-collector mode.
+#
+#   cephfs_clients   every CephFS client: `cephilis health` every minute
+#   cephilis_scanner ONE client: `cephilis space` every 15 minutes
+#
+# Assumes node_exporter reads /var/lib/node_exporter/textfile_collector.
+#   ansible-playbook -i inventory examples/ansible/cephilis.yml
+- name: cephilis
+  hosts: cephfs_clients:cephilis_scanner
+  become: true
+  vars:
+    cephilis_version: "0.3.0"
+    cephilis_arch: amd64
+    textfile_dir: /var/lib/node_exporter/textfile_collector
+    cephilis_mounts: |
+      mounts:
+        - name: cephfs
+          path: /cephfs
+          required: true
+          expected_fstype: ceph
+    cephilis_space: |
+      workers: 16
+      max_dirs: 1000
+      paths:
+        - { path: /cephfs/home, depth: 1, owner: true }
+        - { path: /cephfs/projects, depth: 2 }
+  tasks:
+    - name: Install cephilis binary
+      ansible.builtin.unarchive:
+        src: "https://github.com/HudoGriz/cephilis/releases/download/v{{ cephilis_version }}/cephilis_{{ cephilis_version }}_linux_{{ cephilis_arch }}.tar.gz"
+        dest: /usr/local/bin
+        remote_src: true
+        include: [cephilis]
+        creates: /usr/local/bin/cephilis
+
+    - name: Create config and textfile directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: [/etc/cephilis, "{{ textfile_dir }}"]
+
+    - name: Install config
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "/etc/cephilis/{{ item.file }}"
+        mode: "0644"
+      loop:
+        - { file: mounts.yaml, content: "{{ cephilis_mounts }}" }
+        - { file: sections.yaml, content: "{{ cephilis_space }}" }
+
+    - name: Install units
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/HudoGriz/cephilis/v{{ cephilis_version }}/systemd/{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        mode: "0644"
+      loop:
+        - cephilis-health.service
+        - cephilis-health.timer
+        - cephilis-space.service
+        - cephilis-space.timer
+
+    - name: Health check on every client
+      ansible.builtin.systemd:
+        name: cephilis-health.timer
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: inventory_hostname in groups['cephfs_clients'] | default([])
+
+    - name: Space scan on the scanner node only
+      ansible.builtin.systemd:
+        name: cephilis-space.timer
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: inventory_hostname in groups['cephilis_scanner'] | default([])

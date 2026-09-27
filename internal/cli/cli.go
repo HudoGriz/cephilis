@@ -11,9 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"time"
 
 	"github.com/HudoGriz/cephilis/internal/collector"
 	"github.com/HudoGriz/cephilis/internal/config"
@@ -38,6 +36,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runSpace(args[1:], stdout, stderr)
 	case "health":
 		return runHealth(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	case "init":
 		return runInit(args[1:], stdout, stderr)
 	case "version", "--version", "-version":
@@ -61,6 +61,7 @@ func printRootHelp(out io.Writer) {
 	fmt.Fprintln(out, "  init     Write config templates")
 	fmt.Fprintln(out, "  space    Report directory space usage via CephFS xattrs")
 	fmt.Fprintln(out, "  health   Safe CephFS client health for Slurm, Prometheus, or JSON")
+	fmt.Fprintln(out, "  serve    HTTP /metrics exporter: periodic space scans plus client health")
 	fmt.Fprintln(out, "  version  Print version and exit")
 }
 
@@ -125,7 +126,7 @@ func runHealth(args []string, stdout, stderr io.Writer) error {
 
 func runSpace(args []string, stdout, stderr io.Writer) error {
 	if hasHelpArg(args) {
-		fmt.Fprintln(stdout, "Usage: cephilis space [--config-dir DIR] [--config FILE] [--format table|csv|tsv|json|prom] [--section NAME] [--workers N]")
+		fmt.Fprintln(stdout, "Usage: cephilis space [--config-dir DIR] [--config FILE] [--format table|csv|tsv|json|prom] [--path PATH] [--workers N]")
 		return nil
 	}
 
@@ -135,7 +136,7 @@ func runSpace(args []string, stdout, stderr io.Writer) error {
 	configDir := fs.String("config-dir", "", "Config directory (defaults: $CEPHILIS_CONFIG_DIR, /etc/cephilis, ./config)")
 	configFile := fs.String("config", "", "Path to sections.yaml (overrides --config-dir for this file)")
 	formatName := fs.String("format", "table", "Output format")
-	sectionName := fs.String("section", "", "Only this section")
+	onlyPath := fs.String("path", "", "Only this configured path")
 	workers := fs.Int("workers", 0, "Max parallel workers (0=from config)")
 
 	if err := fs.Parse(args); err != nil {
@@ -149,57 +150,52 @@ func runSpace(args []string, stdout, stderr io.Writer) error {
 		slog.New(slog.NewTextHandler(stderr, nil)).Warn("not running as root — some directories may be unreadable")
 	}
 
-	cfg, err := loadSections(*configFile, *configDir)
+	cfg, err := loadSpace(*configFile, *configDir)
 	if err != nil {
 		return err
 	}
-
-	sections := cfg.Sections
-	if strings.TrimSpace(*sectionName) != "" {
-		sections = filterSection(sections, *sectionName)
-		if len(sections) == 0 {
-			return fmt.Errorf("section not found: %s", *sectionName)
+	if p := strings.TrimSpace(*onlyPath); p != "" {
+		cfg.Paths = filterPath(cfg.Paths, p)
+		if len(cfg.Paths) == 0 {
+			return fmt.Errorf("path not configured: %s", p)
 		}
 	}
-
-	w := *workers
-	if w <= 0 {
-		w = cfg.Workers
+	if *workers > 0 {
+		cfg.Workers = *workers
 	}
 
-	start := time.Now()
-	results := collector.ScanAll(sections, w)
-	if err := reportSpaceErrors(results, stderr); err != nil {
+	scan := collector.Scan(cfg)
+	if err := reportSpaceErrors(scan, stderr); err != nil {
 		return err
 	}
-
-	out, err := format.Space(*formatName, results)
+	out, err := format.Space(*formatName, scan)
 	if err != nil {
 		return err
 	}
 	fmt.Fprint(stdout, out)
-	if *formatName == "table" {
-		fmt.Fprintf(stdout, "Completed in %.1f seconds\n", time.Since(start).Seconds())
-	}
 	return nil
 }
 
-// reportSpaceErrors logs failed sections and skipped directories to stderr.
-// It returns an error only when every section failed, so a partial scan still
-// produces output (failures are visible as cephilis_section_scan_ok 0).
-func reportSpaceErrors(results []model.SectionResult, stderr io.Writer) error {
+// reportSpaceErrors logs failed or incomplete paths to stderr. It returns an
+// error only when every path failed, so a partial scan still produces output
+// (failures are visible as cephilis_root_scan_ok 0).
+func reportSpaceErrors(scan model.Scan, stderr io.Writer) error {
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	failed := 0
-	for _, r := range results {
-		if r.Err != nil {
+	for _, r := range scan.Roots {
+		switch {
+		case r.Err != nil:
 			failed++
-			log.Error("section scan failed", "section", r.Name, "path", r.ParentPath, "err", r.Err)
-		} else if r.FailedDirs > 0 {
-			log.Warn("skipped unreadable directories", "section", r.Name, "count", r.FailedDirs)
+			log.Error("path scan failed", "path", r.Path, "err", r.Err)
+		case r.FailedDirs > 0:
+			log.Warn("skipped unreadable directories", "path", r.Path, "count", r.FailedDirs)
+		}
+		if r.Truncated {
+			log.Warn("tree truncated by max_dirs or max_entries", "path", r.Path, "dirs", r.Dirs)
 		}
 	}
-	if len(results) > 0 && failed == len(results) {
-		return fmt.Errorf("all %d sections failed", failed)
+	if len(scan.Roots) > 0 && failed == len(scan.Roots) {
+		return fmt.Errorf("all %d paths failed", failed)
 	}
 	return nil
 }
@@ -341,14 +337,14 @@ func boolInt(v bool) int {
 	return 0
 }
 
-func loadSections(configFile, configDir string) (config.SectionsConfig, error) {
+func loadSpace(configFile, configDir string) (config.SpaceConfig, error) {
 	if strings.TrimSpace(configFile) != "" {
-		return config.LoadSections(configFile)
+		return config.LoadSpace(configFile)
 	}
 	if strings.TrimSpace(configDir) != "" {
-		return config.LoadSections(configDir)
+		return config.LoadSpace(configDir)
 	}
-	return config.LoadSections("")
+	return config.LoadSpace("")
 }
 
 func loadMounts(configFile, configDir string) (config.MountsConfig, error) {
@@ -361,15 +357,14 @@ func loadMounts(configFile, configDir string) (config.MountsConfig, error) {
 	return config.LoadMounts("")
 }
 
-func filterSection(sections []config.Section, name string) []config.Section {
-	needle := strings.ToLower(strings.TrimSpace(name))
-	out := make([]config.Section, 0)
-	for _, s := range sections {
-		if strings.ToLower(s.Name) == needle {
-			out = append(out, s)
+func filterPath(paths []config.Path, path string) []config.Path {
+	want := filepath.Clean(path)
+	out := make([]config.Path, 0)
+	for _, p := range paths {
+		if p.Path == want {
+			out = append(out, p)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
@@ -406,9 +401,14 @@ mounts:
 `
 
 const sectionsTemplate = `# cephilis sections.yaml
-# Each entry is a directory tree to measure for size (via CephFS xattrs).
+# Directory trees to report, read from CephFS xattrs (no tree walk).
+# depth: levels of subdirectories to report below the path (default 1).
+# owner: add the directory owner's user name as a label.
 workers: 16
-sections:
-  - name: Home Users
-    path: /home
+max_dirs: 1000       # per path; protects Prometheus from huge trees
+max_entries: 10000   # do not list directories with more immediate entries
+paths:
+  - path: /home
+    depth: 1
+    owner: true
 `

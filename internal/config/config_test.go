@@ -13,102 +13,67 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func TestLoadSectionsHappyPath(t *testing.T) {
+func TestLoadSpacePaths(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "data")
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	cfgFile := filepath.Join(dir, SectionsFilename)
-	writeFile(t, cfgFile, "workers: 8\nsections:\n  - name: Test\n    path: "+sub+"\n")
+	writeFile(t, cfgFile, "workers: 8\nmax_dirs: 50\npaths:\n  - path: "+sub+"/\n    depth: 3\n    owner: true\n  - path: "+dir+"\n")
 
-	cfg, err := LoadSections(cfgFile)
+	cfg, err := LoadSpace(cfgFile)
 	if err != nil {
-		t.Fatalf("LoadSections error: %v", err)
+		t.Fatalf("LoadSpace: %v", err)
 	}
-	if len(cfg.Sections) != 1 {
-		t.Fatalf("expected 1 section, got %d", len(cfg.Sections))
+	if cfg.Workers != 8 || cfg.MaxDirs != 50 || cfg.MaxEntries != DefaultMaxEntries {
+		t.Errorf("unexpected limits: %+v", cfg)
 	}
-	if cfg.Sections[0].Name != "Test" {
-		t.Errorf("unexpected section name: %q", cfg.Sections[0].Name)
-	}
-	if cfg.Workers != 8 {
-		t.Errorf("unexpected workers: %d", cfg.Workers)
+	want := []Path{{Path: sub, Depth: 3, Owner: true}, {Path: dir, Depth: DefaultDepth}}
+	if len(cfg.Paths) != 2 || cfg.Paths[0] != want[0] || cfg.Paths[1] != want[1] {
+		t.Errorf("paths = %+v, want %+v", cfg.Paths, want)
 	}
 }
 
-func TestLoadSectionsFromDir(t *testing.T) {
+// Pre-0.3 configs list `sections:`; they keep working as depth-1 paths.
+func TestLoadSpaceLegacySections(t *testing.T) {
 	dir := t.TempDir()
-	sub := filepath.Join(dir, "data")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFile(t, filepath.Join(dir, SectionsFilename),
-		"sections:\n  - name: A\n    path: "+sub+"\n")
-
-	cfg, err := LoadSections(dir)
+	writeFile(t, filepath.Join(dir, SectionsFilename), "sections:\n  - name: Home Users\n    path: "+dir+"\n")
+	cfg, err := LoadSpace(dir)
 	if err != nil {
-		t.Fatalf("LoadSections(dir) error: %v", err)
+		t.Fatalf("LoadSpace: %v", err)
 	}
-	if len(cfg.Sections) != 1 || cfg.Sections[0].Name != "A" {
-		t.Errorf("unexpected sections: %+v", cfg.Sections)
-	}
-	if cfg.Workers != DefaultWorkers {
-		t.Errorf("workers should default to %d, got %d", DefaultWorkers, cfg.Workers)
+	if len(cfg.Paths) != 1 || cfg.Paths[0] != (Path{Path: dir, Depth: 1}) || cfg.Workers != DefaultWorkers {
+		t.Errorf("unexpected config: %+v", cfg)
 	}
 }
 
-func TestLoadSectionsFiltersNonExistent(t *testing.T) {
-	dir := t.TempDir()
-	existing := filepath.Join(dir, "exists")
-	if err := os.Mkdir(existing, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfgFile := filepath.Join(dir, SectionsFilename)
-	writeFile(t, cfgFile,
-		"sections:\n  - name: Exists\n    path: "+existing+"\n  - name: Ghost\n    path: /nonexistent/path/xyz\n")
-
-	cfg, err := LoadSections(cfgFile)
-	if err != nil {
-		t.Fatalf("LoadSections error: %v", err)
-	}
-	if len(cfg.Sections) != 1 || cfg.Sections[0].Name != "Exists" {
-		t.Errorf("expected only Exists survived: %+v", cfg.Sections)
-	}
-}
-
-func TestLoadSectionsAllMissing(t *testing.T) {
+func TestLoadSpaceSkipsMissingPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, SectionsFilename)
-	writeFile(t, cfgFile, "sections:\n  - name: Ghost\n    path: /nonexistent/xyz\n")
-	if _, err := LoadSections(cfgFile); err == nil {
-		t.Fatal("expected error when all paths are missing")
+	writeFile(t, cfgFile, "paths:\n  - path: "+dir+"\n  - path: /nonexistent/xyz\n")
+	cfg, err := LoadSpace(cfgFile)
+	if err != nil || len(cfg.Paths) != 1 {
+		t.Fatalf("LoadSpace = %+v, %v", cfg, err)
 	}
 }
 
-func TestLoadSectionsEmpty(t *testing.T) {
+func TestLoadSpaceErrors(t *testing.T) {
 	dir := t.TempDir()
-	cfgFile := filepath.Join(dir, SectionsFilename)
-	writeFile(t, cfgFile, "sections: []\n")
-	if _, err := LoadSections(cfgFile); err == nil {
-		t.Fatal("expected error for empty sections")
+	for name, content := range map[string]string{
+		"all missing": "paths:\n  - path: /nonexistent/xyz\n",
+		"empty":       "paths: []\n",
+		"no path key": "paths:\n  - depth: 2\n",
+		"bad yaml":    ":\t: invalid\n",
+	} {
+		f := filepath.Join(dir, "x.yaml")
+		writeFile(t, f, content)
+		if _, err := LoadSpace(f); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
 	}
-}
-
-func TestLoadSectionsBadYAML(t *testing.T) {
-	dir := t.TempDir()
-	cfgFile := filepath.Join(dir, SectionsFilename)
-	writeFile(t, cfgFile, ":\t: invalid\n")
-	if _, err := LoadSections(cfgFile); err == nil {
-		t.Fatal("expected error for invalid YAML")
-	}
-}
-
-func TestLoadSectionsMissingFile(t *testing.T) {
-	if _, err := LoadSections("/nonexistent/path/to/config.yaml"); err == nil {
-		t.Fatal("expected error for missing config file")
+	if _, err := LoadSpace("/nonexistent/config.yaml"); err == nil {
+		t.Error("missing file: expected error")
 	}
 }
 

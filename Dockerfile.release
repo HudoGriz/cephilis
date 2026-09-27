@@ -1,0 +1,7 @@
+# Image published by GoReleaser (ghcr.io/hudogriz/cephilis). The binary is
+# static; mount the CephFS tree to scan and /etc/cephilis into the container.
+# Without NSS in the image, owner labels fall back to numeric uids.
+FROM scratch
+COPY cephilis /usr/bin/cephilis
+ENTRYPOINT ["/usr/bin/cephilis"]
+CMD ["serve", "--health=false"]
